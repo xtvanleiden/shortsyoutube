@@ -2,4 +2,6 @@ venv/
 library/
 shorts_output/
 __pycache__/
+impostazioni.json
 *.pyc
+modelli/

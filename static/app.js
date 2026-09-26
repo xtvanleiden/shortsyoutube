@@ -16,9 +16,11 @@ const $ = (id) => document.getElementById(id);
 
 const PAD = 16;          // margine ai lati della timeline (spazio per le maniglie)
 const RULER_H = 20;
+const LANE_H = 18;       // corsia dei clip suggeriti, sotto il righello
+const TRACK_Y = RULER_H + LANE_H;
 const THUMB_H = 64;
-const TL_H = 150;
-const WAVE_H = TL_H - RULER_H - THUMB_H;
+const TL_H = 168;
+const WAVE_H = TL_H - TRACK_Y - THUMB_H;
 const MIN_SEL = 0.5;     // durata minima della selezione (secondi)
 const MAX_PPS = 200;     // zoom massimo (pixel per secondo)
 const MAX_SHORT = 180;   // YouTube Shorts: massimo 3 minuti
@@ -48,6 +50,9 @@ const state = {
   dismissedJobs: new Set(),
   uploads: [],
   transcript: null,     // { words: [{ s, e, w }] }
+  suggestions: [],
+  frame: { dynamic: false, keys: [] },   // inquadratura: punti {t, x, d, m} (vedi media.py)
+  cropDragX: null,      // posizione del riquadro mentre lo trascini      // clip suggeriti: [{ rank, start, end, score, reasons, preview }]
   subY: 0.8,            // altezza del centro dei sottotitoli (0 = in alto, 1 = in basso)
   guideUntil: 0,        // fino a quando mostrare l'anteprima di posizione (dopo una modifica)
   chunks: [],           // gruppi di 2-3 parole, come nei sottotitoli esportati
@@ -121,15 +126,71 @@ function renderVideoList() {
     return `<li data-id="${escapeHtml(v.id)}" class="${active ? "active" : ""} ${ready ? "" : "disabled"}"
                 title="${escapeHtml(v.error || v.title)}">
       <div class="v-title">${escapeHtml(v.title)}</div>
-      <div class="v-meta ${v.status === "error" ? "error" : ""}">${escapeHtml(metaText)}</div>
+      <div class="v-meta ${v.status === "error" ? "error" : ""}">${escapeHtml(metaText)}
+        <span class="v-size">${v.size ? fmtSize(v.size) : ""}</span></div>
+      <button class="v-del" title="Elimina questo video dal computer" aria-label="Elimina video"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg></button>
     </li>`;
   }).join("");
 }
 
+function fmtSize(bytes) {
+  return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
+}
+
 $("video-list").addEventListener("click", (e) => {
   const li = e.target.closest("li[data-id]");
-  if (li && !li.classList.contains("disabled")) openVideo(li.dataset.id);
+  if (!li) return;
+  if (e.target.closest(".v-del")) deleteVideo(li.dataset.id);
+  else if (!li.classList.contains("disabled")) openVideo(li.dataset.id);
 });
+
+async function deleteVideo(id) {
+  const v = state.videos.find((x) => x.id === id);
+  if (!v) return;
+  let msg = `Eliminare "${v.title}"?\n\nVerranno cancellati dal computer il video, la trascrizione, ` +
+            `le miniature e la forma d'onda (${fmtSize(v.size || 0)} in tutto).`;
+  if (v.shorts_count) {
+    msg += `\n\nATTENZIONE: ${v.shorts_count === 1 ? "verrà eliminato anche 1 Short creato" :
+           `verranno eliminati anche ${v.shorts_count} Short creati`} da questo video. Se ti servono, scaricali prima.`;
+  }
+  if (!confirm(msg)) return;
+
+  // Il player tiene aperto il file: va "scollegato" prima, altrimenti Windows non lo lascia cancellare
+  const wasOpen = state.video && state.video.id === id;
+  if (wasOpen) closeVideo();
+
+  try {
+    await api(`/api/videos/${id}`, { method: "DELETE" });
+  } catch (err) {
+    alert(err.message);
+    await loadVideos();
+    if (wasOpen) openVideo(id);   // non è stato cancellato: lo riapro com'era
+    return;
+  }
+  await loadVideos();
+  if (wasOpen) {
+    const next = state.videos.find((x) => x.status === "ready");
+    if (next) openVideo(next.id);
+  }
+}
+
+/** Chiude il video aperto e torna alla schermata iniziale. */
+function closeVideo() {
+  el.player.pause();
+  el.player.removeAttribute("src");
+  el.player.load();
+  $("shorts-list").innerHTML = '<p class="muted">Nessuno Short per questo video.</p>';
+  $("tl-sugs").innerHTML = "";
+  state.video = null;
+  state.transcript = null;
+  state.chunks = [];
+  state.suggestions = [];
+  state.playSel = false;
+  store("lastVideo", "");
+  $("workspace").hidden = true;
+  $("empty").hidden = false;
+  renderVideoList();
+}
 
 let openingId = null;
 
@@ -175,6 +236,7 @@ async function openVideo(id) {
   renderShorts(v.shorts);
   renderVideoList();
   loadTranscript();
+  loadFrame();
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +317,23 @@ async function pollJobs() {
 }
 
 async function onJobFinished(job) {
+  if (job.kind === "reframe") {
+    if (state.video && state.video.id === job.video_id) await loadFrame();
+    const msg = $("track-msg");
+    msg.hidden = false;
+    if (job.status === "error") {
+      msg.className = "small-text warn";
+      msg.textContent = "Errore: " + job.error;
+    } else if (job.result && job.result.warning) {
+      msg.className = "small-text warn";
+      msg.textContent = job.result.warning;
+    } else if (job.result) {
+      msg.className = "small-text ok";
+      msg.textContent = `Fatto: volto trovato nel ${Math.round(job.result.coverage * 100)}% dei fotogrammi. ` +
+                        "Premi ▶ Selezione per vedere il movimento.";
+    }
+    return;
+  }
   if (job.kind === "transcribe") {
     if (state.video && state.video.id === job.video_id) {
       const v = await api(`/api/videos/${job.video_id}`);
@@ -283,6 +362,7 @@ function renderJobs(jobs) {
   const now = Date.now();
   const visible = jobs.filter((j) => {
     if (state.dismissedJobs.has(j.id)) return false;
+    if (j.status === "cancelled") return false;
     if (j.status !== "done") return true;
     if (!state.doneAt[j.id]) state.doneAt[j.id] = now;
     return now - state.doneAt[j.id] < 6000;
@@ -332,6 +412,7 @@ function setPps(pps, anchorT, anchorX) {
   // slider logaritmico: 0 = tutto il video, 1000 = zoom massimo
   const ratio = MAX_PPS / lo;
   el.zoom.value = ratio > 1 ? Math.round((Math.log(state.pps / lo) / Math.log(ratio)) * 1000) : 0;
+  positionSuggestions();
   updateSelectionUI();
   updatePlayhead();
   requestDraw();
@@ -423,14 +504,18 @@ function drawTimeline() {
     ctx.fillRect(Math.round(half), RULER_H - 4, 1, 4);
   }
 
+  // --- corsia dei clip suggeriti (i riquadri colorati sono elementi HTML sopra)
+  ctx.fillStyle = "#141414";
+  ctx.fillRect(xa, RULER_H, xb - xa, LANE_H);
+
   // --- miniature
   const th = state.video.thumbs;
   ctx.save();
   ctx.beginPath();
-  ctx.rect(xa, RULER_H, xb - xa, THUMB_H);
+  ctx.rect(xa, TRACK_Y, xb - xa, THUMB_H);
   ctx.clip();
   ctx.fillStyle = "#2a2a2a";
-  ctx.fillRect(xa, RULER_H, xb - xa, THUMB_H);
+  ctx.fillRect(xa, TRACK_Y, xb - xa, THUMB_H);
   if (th && th.count) {
     const slotW = (THUMB_H * th.width) / th.height;
     const perSheet = th.cols * th.rows;
@@ -443,13 +528,31 @@ function drawTimeline() {
       if (!img || !img.complete || !img.naturalWidth) continue;
       const i = idx % perSheet;
       ctx.drawImage(img, (i % th.cols) * th.width, Math.floor(i / th.cols) * th.height,
-                    th.width, th.height, x, RULER_H, slotW, THUMB_H);
+                    th.width, th.height, x, TRACK_Y, slotW, THUMB_H);
     }
   }
   ctx.restore();
 
+  // --- punti di inquadratura (solo in modalità dinamica)
+  if (state.frame.dynamic) {
+    for (const k of state.frame.keys) {
+      const x = X(k.t);
+      if (x < -6 || x > w + 6) continue;
+      if (k.m) {   // messo a mano: rombo giallo
+        ctx.fillStyle = "#ffd400";
+        ctx.strokeStyle = "#000";
+        ctx.beginPath();
+        ctx.moveTo(x, TRACK_Y + 1); ctx.lineTo(x + 5, TRACK_Y + 7); ctx.lineTo(x, TRACK_Y + 13); ctx.lineTo(x - 5, TRACK_Y + 7);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      } else {     // dal volto: trattino azzurro
+        ctx.fillStyle = "#37d6e6";
+        ctx.fillRect(Math.round(x) - 1, TRACK_Y, 2, 7);
+      }
+    }
+  }
+
   // --- forma d'onda
-  const y0 = RULER_H + THUMB_H;
+  const y0 = TRACK_Y + THUMB_H;
   ctx.fillStyle = "#1a1a1a";
   ctx.fillRect(xa, y0, xb - xa, WAVE_H);
   const peaks = state.peaks && state.peaks.peaks;
@@ -496,6 +599,7 @@ function updateSelectionUI() {
   warn.hidden = len <= MAX_SHORT;
   warn.textContent = "Oltre 3 minuti: YouTube non lo considererà uno Short";
   scheduleTranscriptRender();
+  markActiveSuggestion();
 }
 
 // Anteprima nel player mentre trascini (al massimo un salto per fotogramma)
@@ -516,6 +620,12 @@ function previewSeek(t) {
  */
 el.inner.addEventListener("pointerdown", (e) => {
   if (!state.video || e.button !== 0) return;
+  const sug = e.target.closest(".tl-sug");
+  if (sug) {
+    e.preventDefault();
+    useSuggestion(Number(sug.dataset.k), false);
+    return;
+  }
   const t = timeAtClientX(e.clientX);
   const handle = e.target.dataset && e.target.dataset.handle;
   // grab = distanza tra il punto in cui prendi la maniglia e il bordo vero: così non "salta"
@@ -639,6 +749,7 @@ function tick() {
     $("time-now").textContent = fmt(t);
     updatePlayhead();
     updateSubtitles(t);
+    if (state.frame.dynamic && state.frame.keys.length) updateCropBox();
     // durante la riproduzione la timeline segue la testina
     if (!el.player.paused && !state.drag) {
       const x = xOf(t) - el.scroll.scrollLeft;
@@ -654,13 +765,36 @@ requestAnimationFrame(tick);
 // Riquadro 9:16 sul player (trascinabile)
 // ---------------------------------------------------------------------------
 
+/** Regola dell'inquadratura dinamica, identica a frame_x_at in media.py. */
+function frameXAt(keys, t) {
+  if (!keys.length) return null;
+  if (t <= keys[0].t) return keys[0].x;
+  for (let i = 1; i < keys.length; i++) {
+    const prev = keys[i - 1], cur = keys[i];
+    if (t < cur.t) {
+      const d = Math.min(cur.d || 0, cur.t - prev.t);
+      const a = cur.t - d;
+      if (t <= a || d <= 0) return prev.x;
+      return prev.x + (cur.x - prev.x) * (t - a) / d;
+    }
+  }
+  return keys[keys.length - 1].x;
+}
+
+/** Posizione del riquadro 9:16 in questo momento (0 = sinistra, 1 = destra). */
+function currentCropX() {
+  if (state.cropDragX !== null) return state.cropDragX;
+  if (state.frame.dynamic && state.frame.keys.length) return frameXAt(state.frame.keys, el.player.currentTime || 0);
+  return state.cropX;
+}
+
 function cropGeometry() {
   const v = state.video;
   const W = el.player.clientWidth, H = el.player.clientHeight;
   if (!v || !W || !H || !v.width || !v.height) return null;
   if (v.width / v.height > 9 / 16) {
     const cw = (H * 9) / 16;
-    return { left: (W - cw) * state.cropX, top: 0, width: cw, height: H, free: W - cw };
+    return { left: (W - cw) * currentCropX(), top: 0, width: cw, height: H, free: W - cw };
   }
   const ch = Math.min(H, (W * 16) / 9);
   return { left: 0, top: (H - ch) / 2, width: W, height: ch, free: 0 };
@@ -670,7 +804,13 @@ function updateCropBox() {
   const g = cropGeometry();
   const show = g && el.mode.value === "crop";
   el.cropBox.hidden = !show;
-  $("crop-label").hidden = el.mode.value !== "crop" || !g || g.free === 0;
+  el.cropBox.classList.toggle("dynamic", state.frame.dynamic);
+  // i controlli dell'inquadratura servono solo col ritaglio di un video orizzontale
+  $("frame-controls").hidden = !show || g.free === 0;
+  $("crop-label").hidden = state.frame.dynamic;
+  $("dyn-tools").hidden = !state.frame.dynamic;
+  document.querySelectorAll("[data-frame]").forEach((b) =>
+    b.classList.toggle("on", (b.dataset.frame === "dynamic") === state.frame.dynamic));
   layoutSubtitles();
   if (!show) return;
   Object.assign(el.cropBox.style, {
@@ -684,16 +824,29 @@ el.cropX.addEventListener("input", () => { state.cropX = Number(el.cropX.value);
 el.cropBox.addEventListener("pointerdown", (e) => {
   const g = cropGeometry();
   if (!g || !g.free) return;
-  const startX = e.clientX, startCrop = state.cropX;
+  const dynamic = state.frame.dynamic;
+  if (dynamic) { el.player.pause(); state.playSel = false; }
+  const startX = e.clientX, startCrop = currentCropX();
   el.cropBox.setPointerCapture(e.pointerId);
   const move = (ev) => {
-    state.cropX = clamp(startCrop + (ev.clientX - startX) / g.free, 0, 1);
-    el.cropX.value = state.cropX;
+    const x = clamp(startCrop + (ev.clientX - startX) / g.free, 0, 1);
+    if (dynamic) {
+      state.cropDragX = x;
+    } else {
+      state.cropX = x;
+      el.cropX.value = x;
+    }
     updateCropBox();
   };
   const up = () => {
     el.cropBox.removeEventListener("pointermove", move);
     el.cropBox.removeEventListener("pointerup", up);
+    if (dynamic && state.cropDragX !== null) {
+      // lasciando il riquadro nasce (o si aggiorna) un punto di inquadratura in questo istante
+      upsertKey(el.player.currentTime || 0, state.cropDragX);
+      state.cropDragX = null;
+      updateCropBox();
+    }
   };
   el.cropBox.addEventListener("pointermove", move);
   el.cropBox.addEventListener("pointerup", up);
@@ -723,7 +876,7 @@ $("btn-create").addEventListener("click", async () => {
   try {
     await api(`/api/videos/${state.video.id}/shorts`, {
       json: { start: state.sel.start, end: state.sel.end, mode: el.mode.value, crop_x: state.cropX,
-              subtitles, sub_y: state.subY },
+              subtitles, sub_y: state.subY, dynamic: state.frame.dynamic },
     });
     pollJobs();
   } catch (err) {
@@ -745,7 +898,7 @@ function renderShorts(shorts) {
     return `<div class="short-card" data-file="${escapeHtml(s.file)}">
       <video src="${src}" controls preload="metadata"></video>
       <div class="s-info">${fmt(s.start, 1)} → ${fmt(s.end, 1)} · ${(s.end - s.start).toFixed(1)} s ·
-        ${s.mode === "blur" ? "sfondo sfocato" : "ritaglio"}${s.subtitles ? " · sottotitoli" : ""}</div>
+        ${s.mode === "blur" ? "sfondo sfocato" : "ritaglio"}${s.dynamic ? " · inquadratura dinamica" : ""}${s.subtitles ? " · sottotitoli" : ""}</div>
       <div class="s-actions">
         <a class="btn small" href="${src}?download=1" download="${escapeHtml(s.file)}">Scarica</a>
         <button class="btn small" data-action="reselect" data-start="${s.start}" data-end="${s.end}">Riseleziona</button>
@@ -797,6 +950,7 @@ async function loadTranscript() {
   }
   updateTranscriptStatus();
   renderTranscript();
+  loadSuggestions();
 }
 
 function buildChunks() {
@@ -905,6 +1059,7 @@ $("tr-words").addEventListener("dblclick", async (e) => {
     if (text.trim()) words[i].w = text.trim(); else words.splice(i, 1);
     buildChunks();
     renderTranscript();
+    loadSuggestions();
   } catch (err) {
     alert(err.message);
   }
@@ -1006,6 +1161,193 @@ $("subs").addEventListener("change", () => {
   updateSubtitles(el.player.currentTime || 0);
 });
 setSubY(Number(recall("subY") || 0.8) * 100, false);
+
+// ---------------------------------------------------------------------------
+// Clip suggeriti (calcolati dal server in suggest.py)
+// ---------------------------------------------------------------------------
+
+async function loadSuggestions() {
+  if (!state.video) return;
+  const id = state.video.id;
+  let data = { ready: false, suggestions: [] };
+  try { data = await api(`/api/videos/${id}/suggestions`); } catch { /* ignora */ }
+  if (!state.video || state.video.id !== id) return;
+  state.suggestions = data.suggestions;
+  $("sug-status").textContent = !data.ready
+    ? "Arrivano appena finisce la trascrizione"
+    : data.suggestions.length ? `${data.suggestions.length} proposte, la 1 è la più promettente`
+    : "Nessun segmento adatto (serve almeno 30 s di parlato)";
+  renderSuggestions();
+}
+
+function renderSuggestions() {
+  const list = state.suggestions;
+  $("tl-sugs").innerHTML = list.map((g, k) =>
+    `<div class="tl-sug" data-k="${k}" title="Clip ${g.rank}: ${fmt(g.start, 1)} → ${fmt(g.end, 1)}\n${escapeHtml(g.reasons.join("\n"))}">${g.rank}</div>`
+  ).join("");
+  $("sug-list").innerHTML = list.map((g, k) => `
+    <div class="sug-item" data-k="${k}">
+      <div class="sug-top">
+        <span class="sug-rank">${g.rank}</span>
+        <span class="sug-time">${fmt(g.start, 1)} → ${fmt(g.end, 1)}</span>
+        <span class="muted">${(g.end - g.start).toFixed(0)} s</span>
+        <span class="sug-score" title="Punteggio dell'euristica, da 0 a 100">${g.score}/100</span>
+      </div>
+      <div class="sug-preview">“${escapeHtml(g.preview)}…”</div>
+      <ul class="sug-reasons">${g.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>
+      <div class="sug-actions">
+        <button class="btn small" data-action="use">Usa questo</button>
+        <button class="btn small" data-action="listen">▶ Ascolta</button>
+      </div>
+    </div>`).join("");
+  positionSuggestions();
+  markActiveSuggestion();
+}
+
+function positionSuggestions() {
+  document.querySelectorAll(".tl-sug").forEach((div) => {
+    const g = state.suggestions[div.dataset.k];
+    if (!g) return;
+    div.style.left = `${xOf(g.start)}px`;
+    div.style.width = `${Math.max(14, (g.end - g.start) * state.pps)}px`;
+  });
+}
+
+function markActiveSuggestion() {
+  const { start, end } = state.sel;
+  document.querySelectorAll(".tl-sug, .sug-item").forEach((node) => {
+    const g = state.suggestions[node.dataset.k];
+    node.classList.toggle("active", !!g && Math.abs(g.start - start) < 0.05 && Math.abs(g.end - end) < 0.05);
+  });
+}
+
+/** Porta il suggerimento nella selezione (poi lo rifinisci con le maniglie). */
+function useSuggestion(k, zoom = true) {
+  const g = state.suggestions[k];
+  if (!g) return;
+  state.playSel = false;
+  setSel(g.start, g.end);
+  if (zoom) zoomToSelection();
+  seek(g.start);
+}
+
+$("sug-list").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  const k = Number(btn.closest(".sug-item").dataset.k);
+  useSuggestion(k);
+  if (btn.dataset.action === "listen") playSelection();
+});
+
+// --- parole chiave
+async function loadSettings() {
+  try {
+    const settings = await api("/api/settings");
+    $("kw-text").value = settings.keywords.join("\n");
+    $("kw-count").textContent = `(${settings.keywords.length})`;
+  } catch { /* ignora */ }
+}
+
+$("btn-kw-save").addEventListener("click", async () => {
+  const keywords = $("kw-text").value.split("\n").map((k) => k.trim()).filter(Boolean);
+  try {
+    const settings = await api("/api/settings", { method: "PUT", json: { keywords } });
+    $("kw-count").textContent = `(${settings.keywords.length})`;
+    loadSuggestions();
+  } catch (err) {
+    alert(err.message);
+  }
+});
+loadSettings();
+
+// ---------------------------------------------------------------------------
+// Inquadratura dinamica
+// ---------------------------------------------------------------------------
+
+async function loadFrame() {
+  const id = state.video.id;
+  let data = { dynamic: false, keys: [] };
+  try { data = await api(`/api/videos/${id}/inquadratura`); } catch { /* ignora */ }
+  if (!state.video || state.video.id !== id) return;
+  state.frame = data;
+  $("track-msg").hidden = true;   // il messaggio del video precedente non vale più
+  $("track-msg").textContent = "";
+  updateCropBox();
+  requestDraw();
+}
+
+let frameSaveTimer = null;
+function saveFrame() {
+  const id = state.video.id, data = state.frame;
+  clearTimeout(frameSaveTimer);
+  frameSaveTimer = setTimeout(() => {
+    api(`/api/videos/${id}/inquadratura`, { method: "PUT", json: data }).catch((err) => alert(err.message));
+  }, 300);
+  updateCropBox();
+  requestDraw();
+}
+
+/** Aggiunge un punto a mano; se ce n'è già uno vicinissimo lo sposta. */
+function upsertKey(t, x) {
+  const keys = state.frame.keys;
+  const near = keys.find((k) => Math.abs(k.t - t) < 0.25);
+  if (near) {
+    near.x = x;
+    near.m = true;
+    near.d = Math.max(near.d, 0.6);
+  } else {
+    keys.push({ t, x, d: 0.6, m: true });   // 0,6 s di panoramica per arrivare qui
+    keys.sort((a, b) => a.t - b.t);
+  }
+  saveFrame();
+}
+
+document.querySelectorAll("[data-frame]").forEach((btn) => btn.addEventListener("click", () => {
+  const dynamic = btn.dataset.frame === "dynamic";
+  if (dynamic === state.frame.dynamic) return;
+  state.frame.dynamic = dynamic;
+  // passando a "dinamica" senza punti, si parte dalla posizione fissa attuale
+  if (dynamic && !state.frame.keys.length) {
+    state.frame.keys.push({ t: state.sel.start, x: state.cropX, d: 0, m: true });
+  }
+  $("track-msg").hidden = true;
+  saveFrame();
+}));
+
+$("btn-track").addEventListener("click", async () => {
+  const msg = $("track-msg");
+  try {
+    await api(`/api/videos/${state.video.id}/reframe`, { json: { start: state.sel.start, end: state.sel.end } });
+    msg.hidden = false;
+    msg.className = "small-text muted";
+    msg.textContent = "Cerco il volto nella selezione…";
+    pollJobs();
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+$("btn-key-del").addEventListener("click", () => {
+  const t = el.player.currentTime || 0;
+  const keys = state.frame.keys;
+  let best = -1;
+  keys.forEach((k, i) => { if (Math.abs(k.t - t) < 0.4 && (best < 0 || Math.abs(k.t - t) < Math.abs(keys[best].t - t))) best = i; });
+  if (best < 0) {
+    alert("Nessun punto vicino alla testina. Porta la testina su un rombo giallo (o un trattino azzurro) della timeline.");
+    return;
+  }
+  keys.splice(best, 1);
+  saveFrame();
+});
+
+$("btn-keys-clear").addEventListener("click", () => {
+  const { start, end } = state.sel;
+  const inside = state.frame.keys.filter((k) => k.t >= start && k.t <= end).length;
+  if (!inside) return;
+  if (!confirm(`Eliminare ${inside} punti di inquadratura nella selezione?`)) return;
+  state.frame.keys = state.frame.keys.filter((k) => k.t < start || k.t > end);
+  saveFrame();
+});
 
 // ---------------------------------------------------------------------------
 // Scorciatoie da tastiera

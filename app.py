@@ -14,9 +14,11 @@ Struttura dei dati (cartella library/):
 """
 
 import json
+import os
 import queue
 import sys
 import re
+import shutil
 import threading
 import time
 import traceback
@@ -27,11 +29,14 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_from_directory
 
 import media
+import suggest
 
 ROOT = Path(__file__).parent
-LIBRARY = ROOT / "library"
+# SHORTS_LIBRARY / SHORTS_PORT permettono di avviare una seconda copia (es. per provare) senza
+# toccare la libreria vera
+LIBRARY = Path(os.environ.get("SHORTS_LIBRARY", ROOT / "library"))
 STATIC = ROOT / "static"
-HOST, PORT = "127.0.0.1", 8765
+HOST, PORT = "127.0.0.1", int(os.environ.get("SHORTS_PORT", 8765))
 
 app = Flask(__name__, static_folder=None)
 
@@ -95,7 +100,7 @@ TRANSCRIBE_QUEUE: "queue.Queue[tuple[str, callable]]" = queue.Queue()
 
 def submit(kind: str, label: str, video_id: str | None, fn, q: queue.Queue = JOB_QUEUE) -> dict:
     job = {"id": uuid.uuid4().hex[:10], "kind": kind, "label": label, "video_id": video_id,
-           "status": "queued", "progress": 0.0, "step": "In coda", "error": None,
+           "status": "queued", "progress": 0.0, "step": "In coda", "error": None, "result": None,
            "created": time.time()}
     JOBS[job["id"]] = job
     q.put((job["id"], fn))
@@ -106,6 +111,8 @@ def worker(q: queue.Queue) -> None:
     while True:
         job_id, fn = q.get()
         job = JOBS[job_id]
+        if job["status"] == "cancelled":   # il video è stato eliminato mentre era in coda
+            continue
         job["status"] = "running"
 
         def progress(value: float, step: str) -> None:
@@ -135,6 +142,15 @@ def analyze_video(video_id: str, progress) -> None:
         raise
     if not (folder / "transcript.json").exists():
         start_transcription(video_id)
+
+
+def download_job(video_id: str, url: str):
+    """Lavoro di download + analisi (usato anche per riprendere un download interrotto)."""
+    def run(job, progress):
+        src = media.download_youtube(url, video_dir(video_id), progress)
+        update_meta(video_id, file=src.name)
+        analyze_video(video_id, progress)
+    return run
 
 
 def start_transcription(video_id: str) -> dict:
@@ -169,11 +185,70 @@ def static_files(name):
     return send_from_directory(STATIC, name)
 
 
+def library_metas():
+    """Tutti i video della libreria (le cartelle che iniziano con "_" sono in eliminazione)."""
+    for p in LIBRARY.glob("*/meta.json"):
+        if not p.parent.name.startswith("_") and (meta := read_json(p)):
+            yield p, meta
+
+
+def folder_size(folder: Path) -> int:
+    return sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
+
+
 @app.get("/api/videos")
 def list_videos():
-    videos = [m for p in LIBRARY.glob("*/meta.json") if (m := read_json(p))]
+    videos = []
+    for p, meta in library_metas():
+        meta["size"] = folder_size(p.parent)
+        meta["shorts_count"] = len(read_json(p.parent / "shorts" / "shorts.json", []))
+        videos.append(meta)
     videos.sort(key=lambda m: m.get("created", 0), reverse=True)
     return jsonify(videos)
+
+
+def remove_tree(folder: Path, attempts: int = 10) -> bool:
+    """Cancella una cartella riprovando un po': su Windows un file appena chiuso può restare bloccato."""
+    for _ in range(attempts):
+        try:
+            shutil.rmtree(folder)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            time.sleep(0.3)
+    return False
+
+
+@app.delete("/api/videos/<video_id>")
+def delete_video(video_id):
+    """Elimina il video e tutto ciò che gli appartiene: file, miniature, forma d'onda, trascrizione, Short."""
+    folder = video_dir(video_id)
+    if not (folder / "meta.json").exists():
+        abort(404)
+    busy = [j for j in JOBS.values() if j["video_id"] == video_id and j["status"] == "running"]
+    if busy:
+        return jsonify(error=f"Sto ancora lavorando su questo video ({busy[0]['step'].lower()}): "
+                             "riprova quando ha finito."), 409
+    for job in JOBS.values():
+        if job["video_id"] == video_id and job["status"] == "queued":
+            job["status"], job["step"] = "cancelled", "Annullato"
+
+    freed = folder_size(folder)
+    # Prima si rinomina la cartella: se un file è ancora aperto Windows rifiuta e non si cancella
+    # niente a metà. Dopo, la cartella rinominata non compare più nella libreria.
+    trash = LIBRARY / f"_eliminare_{video_id}_{uuid.uuid4().hex[:6]}"
+    for _ in range(10):
+        try:
+            folder.rename(trash)
+            break
+        except OSError:
+            time.sleep(0.3)
+    else:
+        return jsonify(error="Non riesco a eliminare il video: un file è ancora aperto "
+                             "(magari in un altro programma). Riprova tra qualche secondo."), 409
+    remove_tree(trash)   # se resta qualcosa, lo ripulisce il prossimo avvio
+    return jsonify(ok=True, freed=freed)
 
 
 @app.get("/api/videos/<video_id>")
@@ -215,14 +290,7 @@ def add_from_url():
                "duration": info.get("duration") or 0, "file": "source.mp4",
                "status": "downloading", "created": time.time()})
 
-    def run(job, progress):
-        src = media.download_youtube(url, folder, progress)
-        meta = load_meta(video_id)
-        meta["file"] = src.name
-        save_meta(meta)
-        analyze_video(video_id, progress)
-
-    job = submit("download", info.get("title") or url, video_id, run)
+    job = submit("download", info.get("title") or url, video_id, download_job(video_id, url))
     return jsonify(video_id=video_id, job=job)
 
 
@@ -301,6 +369,120 @@ def edit_word(video_id):
 
 
 # --------------------------------------------------------------------------
+# API: clip suggeriti + impostazioni (parole chiave)
+# --------------------------------------------------------------------------
+
+SETTINGS_PATH = ROOT / "impostazioni.json"
+
+
+def load_settings() -> dict:
+    return {"keywords": suggest.DEFAULT_KEYWORDS, **read_json(SETTINGS_PATH, {})}
+
+
+@app.get("/api/settings")
+def get_settings():
+    return jsonify(load_settings())
+
+
+@app.put("/api/settings")
+def put_settings():
+    body = request.get_json(silent=True) or {}
+    settings = load_settings()
+    if isinstance(body.get("keywords"), list):
+        settings["keywords"] = [str(k).strip() for k in body["keywords"] if str(k).strip()]
+    write_json(SETTINGS_PATH, settings)
+    return jsonify(settings)
+
+
+@app.get("/api/videos/<video_id>/suggestions")
+def get_suggestions(video_id):
+    meta = load_meta(video_id)
+    data = read_json(video_dir(video_id) / "transcript.json")
+    if not data:
+        return jsonify(ready=False, suggestions=[])
+    # si ricalcola ogni volta (pochi millisecondi): tiene conto di correzioni e parole chiave nuove
+    return jsonify(ready=True, suggestions=suggest.suggest(
+        data["words"], load_settings()["keywords"], meta.get("duration", 0)))
+
+
+# --------------------------------------------------------------------------
+# API: inquadratura dinamica (punti di inquadratura + segui il volto)
+# --------------------------------------------------------------------------
+
+FRAME_LOCK = threading.Lock()
+
+
+def frame_path(video_id: str) -> Path:
+    return video_dir(video_id) / "inquadratura.json"
+
+
+def load_frame(video_id: str) -> dict:
+    return {"dynamic": False, "keys": [], **read_json(frame_path(video_id), {})}
+
+
+def clean_keys(keys) -> list[dict]:
+    out = []
+    for k in keys if isinstance(keys, list) else []:
+        try:
+            out.append({"t": round(float(k["t"]), 3), "x": min(1.0, max(0.0, float(k["x"]))),
+                        "d": max(0.0, float(k.get("d", 0))), "m": bool(k.get("m", True))})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return sorted(out, key=lambda k: k["t"])
+
+
+@app.get("/api/videos/<video_id>/inquadratura")
+def get_frame(video_id):
+    load_meta(video_id)
+    return jsonify(load_frame(video_id))
+
+
+@app.put("/api/videos/<video_id>/inquadratura")
+def put_frame(video_id):
+    load_meta(video_id)
+    body = request.get_json(silent=True) or {}
+    with FRAME_LOCK:
+        data = load_frame(video_id)
+        if "dynamic" in body:
+            data["dynamic"] = bool(body["dynamic"])
+        if "keys" in body:
+            data["keys"] = clean_keys(body["keys"])
+        write_json(frame_path(video_id), data)
+    return jsonify(data)
+
+
+@app.post("/api/videos/<video_id>/reframe")
+def reframe(video_id):
+    """Segui il volto nel segmento [start, end]: sostituisce i punti di inquadratura in quel tratto."""
+    meta = load_meta(video_id)
+    if meta.get("status") != "ready":
+        return jsonify(error="Il video non è ancora pronto"), 400
+    body = request.get_json(silent=True) or {}
+    try:
+        start, end = max(0.0, float(body["start"])), min(meta["duration"], float(body["end"]))
+    except (KeyError, TypeError, ValueError):
+        return jsonify(error="Inizio/fine non validi"), 400
+    if end - start < 1:
+        return jsonify(error="Seleziona almeno 1 secondo"), 400
+
+    def run(job, progress):
+        result = media.track_face(video_dir(video_id) / meta["file"], start, end,
+                                  meta["width"], meta["height"], progress)
+        if result["keys"]:
+            with FRAME_LOCK:
+                data = load_frame(video_id)
+                kept = [k for k in data["keys"] if k["t"] < start or k["t"] > end]
+                data["keys"] = clean_keys(kept + result["keys"])
+                data["dynamic"] = True
+                write_json(frame_path(video_id), data)
+        job["result"] = {"warning": result["warning"], "count": len(result["keys"]),
+                         "coverage": result["coverage"]}
+
+    job = submit("reframe", f"Segui il volto {fmt_time(start)}–{fmt_time(end)}", video_id, run)
+    return jsonify(job=job)
+
+
+# --------------------------------------------------------------------------
 # API: Short
 # --------------------------------------------------------------------------
 
@@ -325,6 +507,7 @@ def create_short(video_id):
     mode = body.get("mode") if body.get("mode") in ("crop", "blur") else "crop"
     crop_x = float(body.get("crop_x", 0.5))
     subtitles = bool(body.get("subtitles"))
+    dynamic = bool(body.get("dynamic")) and mode == "crop"
     try:
         sub_y = min(0.95, max(0.05, float(body.get("sub_y", media.SUB_Y_DEFAULT))))
     except (TypeError, ValueError):
@@ -340,11 +523,14 @@ def create_short(video_id):
     def run(job, progress):
         # la trascrizione si legge ora, così include le correzioni fatte fino all'ultimo
         words = read_json(folder / "transcript.json", {}).get("words") if subtitles else None
+        # anche i punti di inquadratura si leggono ora (con le ultime modifiche)
+        frame_keys = load_frame(video_id)["keys"] if dynamic else None
         media.export_short(folder / meta["file"], shorts_dir / filename, start, end,
-                           meta["width"], meta["height"], mode, crop_x, progress, words, sub_y)
+                           meta["width"], meta["height"], mode, crop_x, progress, words, sub_y,
+                           frame_keys)
         shorts = read_json(shorts_dir / "shorts.json", [])
         shorts.insert(0, {"file": filename, "start": start, "end": end, "mode": mode,
-                          "crop_x": crop_x, "subtitles": subtitles, "sub_y": sub_y,
+                          "crop_x": crop_x, "dynamic": bool(frame_keys), "subtitles": subtitles, "sub_y": sub_y,
                           "created": time.time()})
         write_json(shorts_dir / "shorts.json", shorts)
 
@@ -376,14 +562,18 @@ def list_jobs():
 
 def resume_unfinished() -> None:
     """Se l'app è stata chiusa durante un'elaborazione, la riprende."""
-    for p in LIBRARY.glob("*/meta.json"):
-        meta = read_json(p)
-        if meta and meta.get("status") == "ready" and meta.get("transcript") in ("queued", "running"):
+    for leftover in LIBRARY.glob("_eliminare_*"):   # eliminazioni non completate
+        remove_tree(leftover, attempts=1)
+    for p, meta in library_metas():
+        if meta.get("status") == "ready" and meta.get("transcript") in ("queued", "running"):
             start_transcription(meta["id"])
-        if not meta or meta.get("status") == "ready":
+        if meta.get("status") == "ready":
             continue
-        if (p.parent / meta.get("file", "")).is_file():
-            vid = meta["id"]
+        vid = meta["id"]
+        if meta.get("status") == "downloading" and meta.get("source_url"):
+            # download interrotto (app chiusa a metà): si riprende da dove era arrivato
+            submit("download", meta.get("title", vid), vid, download_job(vid, meta["source_url"]))
+        elif (p.parent / meta.get("file", "")).is_file():
             submit("analyze", meta.get("title", vid), vid, lambda job, progress, vid=vid: analyze_video(vid, progress))
         else:
             meta["status"], meta["error"] = "error", "Download interrotto: riprova dall'URL"

@@ -75,10 +75,25 @@
                 <option value="blur">Video intero + sfondo sfocato</option>
               </select>
             </label>
-            <label id="crop-label">Inquadratura
+            <button id="btn-create" class="btn primary big">Crea Short</button>
+          </div>
+
+          <div id="frame-controls" class="frame-controls">
+            <span class="muted">Inquadratura</span>
+            <div class="seg" role="group">
+              <button class="btn small" data-frame="fixed" title="Il riquadro 9:16 resta fermo per tutto lo Short">Fissa</button>
+              <button class="btn small" data-frame="dynamic" title="Il riquadro si sposta nel tempo, seguendo i punti di inquadratura">Dinamica</button>
+            </div>
+            <label id="crop-label" title="Posizione del riquadro fisso">
               <input id="crop-x" type="range" min="0" max="1" step="0.01" value="0.5">
             </label>
-            <button id="btn-create" class="btn primary big">Crea Short</button>
+            <span id="dyn-tools" class="dyn-tools">
+              <button id="btn-track" class="btn small" title="Cerca il volto nella selezione e crea i punti di inquadratura in automatico">Segui il volto (selezione)</button>
+              <button id="btn-key-del" class="btn small" title="Elimina il punto di inquadratura vicino alla testina">Rimuovi punto qui</button>
+              <button id="btn-keys-clear" class="btn small" title="Elimina tutti i punti di inquadratura dentro la selezione">Cancella punti nella selezione</button>
+              <span class="muted small-text">Per ricentrare a mano: porta la testina nel punto giusto e trascina il riquadro giallo sul video</span>
+            </span>
+            <span id="track-msg" class="small-text" hidden></span>
           </div>
 
           <div class="subs-controls">
@@ -112,6 +127,7 @@
         <div id="tl-scroll" class="tl-scroll">
           <div id="tl-inner" class="tl-inner">
             <canvas id="tl-canvas" class="tl-canvas"></canvas>
+            <div id="tl-sugs"></div>
             <div id="tl-sel" class="tl-sel">
               <div class="handle left" data-handle="start"></div>
               <div class="handle right" data-handle="end"></div>
@@ -119,6 +135,21 @@
             <div id="tl-playhead" class="tl-playhead"></div>
           </div>
         </div>
+
+        <section class="suggestions">
+          <div class="transcript-head">
+            <h2>Clip suggeriti</h2>
+            <span id="sug-status" class="muted small-text"></span>
+          </div>
+          <p class="muted small-text">Scelti in automatico da pause, ritmo del parlato e parole chiave: sono un punto di partenza, rifinisci tu con le maniglie.</p>
+          <div id="sug-list" class="sug-list"></div>
+          <details class="keywords">
+            <summary>Parole chiave <span id="kw-count" class="muted"></span></summary>
+            <p class="muted small-text">Una per riga. Contano nomi delle iniziative e frasi tipo “dovete sapere che”. Maiuscole e accenti non contano.</p>
+            <textarea id="kw-text" rows="8" spellcheck="false"></textarea>
+            <button id="btn-kw-save" class="btn small">Salva e ricalcola</button>
+          </details>
+        </section>
 
         <section class="transcript">
           <div class="transcript-head">
