@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <title>Shorts Studio</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect x=%224%22 y=%221%22 width=%228%22 height=%2214%22 rx=%222%22 fill=%22%23ffd400%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Shorts Studio</div>
+    <form id="url-form" class="url-form">
+      <input id="url-input" type="url" placeholder="Incolla l'URL di un video YouTube…" required>
+      <button type="submit" class="btn primary">Scarica</button>
+      <label class="btn">
+        Carica file…
+        <input id="file-input" type="file" accept="video/*,.mkv" hidden>
+      </label>
+    </form>
+    <div id="jobs" class="jobs"></div>
+  </header>
+
+  <div class="layout">
+    <!-- Libreria video -->
+    <aside class="sidebar">
+      <h2>I tuoi video</h2>
+      <ul id="video-list" class="video-list"></ul>
+    </aside>
+
+    <!-- Editor -->
+    <main class="editor">
+      <div id="empty" class="empty">
+        <p>Scarica un video da YouTube o carica un file per iniziare.</p>
+      </div>
+
+      <div id="workspace" class="workspace" hidden>
+        <h1 id="video-title" class="video-title"></h1>
+
+        <div class="player-wrap">
+          <div id="player-box" class="player-box">
+            <video id="player" preload="auto"></video>
+            <div id="crop-box" class="crop-box" title="Trascina per spostare l'inquadratura verticale"></div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <div class="transport">
+            <button id="btn-play" class="btn icon" title="Play/Pausa (spazio)">▶</button>
+            <button id="btn-play-sel" class="btn" title="Riproduci solo la selezione (P)">▶ Selezione</button>
+            <span id="time-now" class="time">0:00.00</span>
+            <span class="muted">/</span>
+            <span id="time-total" class="time muted">0:00</span>
+          </div>
+
+          <div class="selection">
+            <label>Inizio
+              <input id="in-start" class="time-input" type="text" inputmode="decimal">
+              <button id="btn-set-start" class="btn small" title="Imposta inizio al punto attuale (I)">⇤ qui</button>
+            </label>
+            <label>Fine
+              <input id="in-end" class="time-input" type="text" inputmode="decimal">
+              <button id="btn-set-end" class="btn small" title="Imposta fine al punto attuale (O)">qui ⇥</button>
+            </label>
+            <span class="duration">Durata <b id="sel-duration">0.0 s</b></span>
+            <span id="sel-warning" class="warning" hidden></span>
+          </div>
+
+          <div class="export">
+            <label>Formato
+              <select id="mode">
+                <option value="crop">Ritaglio 9:16</option>
+                <option value="blur">Video intero + sfondo sfocato</option>
+              </select>
+            </label>
+            <label id="crop-label">Inquadratura
+              <input id="crop-x" type="range" min="0" max="1" step="0.01" value="0.5">
+            </label>
+            <button id="btn-create" class="btn primary big">Crea Short</button>
+          </div>
+        </div>
+
+        <div class="timeline-bar">
+          <span class="muted small-text">Trascina sulla timeline per selezionare · maniglie per rifinire · Ctrl+rotella per lo zoom</span>
+          <div class="zoom">
+            <button id="btn-zoom-out" class="btn small" title="Riduci zoom">−</button>
+            <input id="zoom" type="range" min="0" max="1000" value="500">
+            <button id="btn-zoom-in" class="btn small" title="Aumenta zoom">+</button>
+            <button id="btn-fit" class="btn small">Tutto il video</button>
+            <button id="btn-zoom-sel" class="btn small">Zoom selezione</button>
+          </div>
+        </div>
+
+        <div id="tl-scroll" class="tl-scroll">
+          <div id="tl-inner" class="tl-inner">
+            <canvas id="tl-canvas" class="tl-canvas"></canvas>
+            <div id="tl-sel" class="tl-sel">
+              <div class="handle left" data-handle="start"></div>
+              <div class="handle right" data-handle="end"></div>
+            </div>
+            <div id="tl-playhead" class="tl-playhead"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Short generati -->
+    <aside class="shorts-panel">
+      <h2>Short creati</h2>
+      <div id="shorts-list" class="shorts-list">
+        <p class="muted">Nessuno Short per questo video.</p>
+      </div>
+    </aside>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

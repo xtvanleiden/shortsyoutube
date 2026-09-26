@@ -1,0 +1,270 @@
+"""
+Operazioni sui file video: download, analisi, miniature, waveform, esportazione.
+
+Tutto il lavoro "pesante" passa da ffmpeg/ffprobe (devono essere nel PATH)
+e da yt-dlp (libreria Python, installata nel venv).
+"""
+
+import json
+import math
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
+
+ProgressCb = Callable[[float, str], None]
+
+# Miniature della timeline: 160x90, raccolte in "fogli" da 10x10
+THUMB_W, THUMB_H = 160, 90
+SHEET_COLS, SHEET_ROWS = 10, 10
+
+# Waveform: 25 valori al secondo, calcolati su audio mono a 8 kHz
+PEAKS_PER_SEC = 25
+PEAK_SAMPLE_RATE = 8000
+
+SHORT_W, SHORT_H = 1080, 1920
+
+
+# --------------------------------------------------------------------------
+# Controlli iniziali
+# --------------------------------------------------------------------------
+
+def missing_tools() -> list[str]:
+    return [t for t in ("ffmpeg", "ffprobe") if shutil.which(t) is None]
+
+
+def ensure_ytdlp() -> None:
+    """Installa yt-dlp nel venv se manca."""
+    try:
+        import yt_dlp  # noqa: F401
+    except ImportError:
+        print("yt-dlp non trovato, lo installo ...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"], check=True)
+
+
+# --------------------------------------------------------------------------
+# ffmpeg con barra di avanzamento
+# --------------------------------------------------------------------------
+
+def run_ffmpeg(args: list[str], duration: float, progress: ProgressCb | None, label: str) -> None:
+    """Esegue ffmpeg leggendo l'avanzamento da -progress e riportandolo come 0..1."""
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1", *args]
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
+        for line in proc.stdout:
+            key, _, value = line.strip().partition("=")
+            if key in ("out_time_us", "out_time_ms") and value.isdigit() and progress and duration > 0:
+                progress(min(1.0, int(value) / 1_000_000 / duration), label)
+        proc.wait()
+        if proc.returncode != 0:
+            err.seek(0)
+            msg = err.read().decode("utf-8", "replace").strip().splitlines()[-5:]
+            raise RuntimeError("ffmpeg ha dato errore:\n" + "\n".join(msg))
+
+
+# --------------------------------------------------------------------------
+# Analisi file
+# --------------------------------------------------------------------------
+
+def probe(path: Path) -> dict:
+    """Durata e dimensioni (già corrette per eventuale rotazione, es. video da telefono)."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height:stream_side_data=rotation:format=duration",
+         "-of", "json", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(out.stdout)
+    stream = (data.get("streams") or [{}])[0]
+    width, height = int(stream.get("width", 0)), int(stream.get("height", 0))
+    rotation = 0
+    for sd in stream.get("side_data_list", []) or []:
+        if "rotation" in sd:
+            rotation = int(sd["rotation"])
+    if abs(rotation) % 180 == 90:
+        width, height = height, width
+    return {
+        "duration": float(data.get("format", {}).get("duration", 0) or 0),
+        "width": width,
+        "height": height,
+    }
+
+
+# --------------------------------------------------------------------------
+# 1. Download da YouTube
+# --------------------------------------------------------------------------
+
+def youtube_info(url: str) -> dict:
+    import yt_dlp
+
+    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True}) as ydl:
+        return ydl.extract_info(url, download=False)
+
+
+def download_youtube(url: str, dest_dir: Path, progress: ProgressCb) -> Path:
+    """Scarica il video in dest_dir/source.mp4 (H.264 fino a 1080p, così il browser lo riproduce)."""
+    import yt_dlp
+
+    def hook(d: dict) -> None:
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            if total:
+                progress(d.get("downloaded_bytes", 0) / total, "Download")
+        elif d.get("status") == "finished":
+            progress(1.0, "Unione audio/video")
+
+    opts = {
+        "format": "bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        "merge_output_format": "mp4",
+        "outtmpl": str(dest_dir / "source.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "progress_hooks": [hook],
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+
+    for p in dest_dir.glob("source.*"):
+        if p.suffix.lower() in (".mp4", ".mkv", ".webm"):
+            return p
+    raise RuntimeError("Download fallito: nessun file video trovato.")
+
+
+# --------------------------------------------------------------------------
+# 3a. Miniature per la timeline
+# --------------------------------------------------------------------------
+
+def thumb_interval(duration: float) -> int:
+    if duration <= 600:
+        return 2
+    if duration <= 1800:
+        return 3
+    return 5
+
+
+def make_thumbnails(src: Path, out_dir: Path, duration: float, progress: ProgressCb) -> dict:
+    """
+    Crea i fogli di miniature (sheet_000.jpg, ...) e restituisce le info per la GUI.
+
+    Trucco per la velocità: -skip_frame nokey decodifica solo i fotogrammi chiave,
+    quindi anche un video di 1-2 ore si elabora in poco tempo.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("sheet_*.jpg"):
+        old.unlink()
+
+    interval = thumb_interval(duration)
+    vf = (
+        f"fps=1/{interval},"
+        f"scale={THUMB_W}:{THUMB_H}:force_original_aspect_ratio=decrease,"
+        f"pad={THUMB_W}:{THUMB_H}:(ow-iw)/2:(oh-ih)/2,"
+        f"tile={SHEET_COLS}x{SHEET_ROWS}"
+    )
+    per_sheet = SHEET_COLS * SHEET_ROWS
+    run_ffmpeg(
+        ["-y", "-skip_frame", "nokey", "-i", str(src), "-an", "-sn", "-dn",
+         "-vf", vf, "-fps_mode", "vfr", "-q:v", "5", str(out_dir / "sheet_%03d.jpg")],
+        duration, progress, "Miniature",
+    )
+    sheets = sorted(p.name for p in out_dir.glob("sheet_*.jpg"))
+    return {
+        "interval": interval,
+        "count": min(math.floor(duration / interval) + 1, len(sheets) * per_sheet),
+        "width": THUMB_W,
+        "height": THUMB_H,
+        "cols": SHEET_COLS,
+        "rows": SHEET_ROWS,
+        "sheets": sheets,
+    }
+
+
+# --------------------------------------------------------------------------
+# 3b. Forma d'onda audio
+# --------------------------------------------------------------------------
+
+def make_peaks(src: Path, duration: float, progress: ProgressCb) -> dict:
+    """Legge l'audio mono a 8 kHz e calcola il picco di ogni 1/25 di secondo (valori 0-100)."""
+    bucket = PEAK_SAMPLE_RATE // PEAKS_PER_SEC
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(src),
+           "-vn", "-ac", "1", "-ar", str(PEAK_SAMPLE_RATE), "-f", "s16le", "-"]
+    peaks: list[np.ndarray] = []
+    leftover = np.zeros(0, dtype=np.int16)
+    done_samples = 0
+    total_samples = max(1, duration * PEAK_SAMPLE_RATE)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    while True:
+        chunk = proc.stdout.read(bucket * 2 * 2000)
+        if not chunk:
+            break
+        samples = np.concatenate([leftover, np.frombuffer(chunk, dtype=np.int16)])
+        n = len(samples) // bucket
+        if n:
+            block = np.abs(samples[: n * bucket].astype(np.int32)).reshape(n, bucket)
+            peaks.append(block.max(axis=1))
+        leftover = samples[n * bucket:]
+        done_samples += len(chunk) // 2
+        progress(min(1.0, done_samples / total_samples), "Forma d'onda")
+    proc.wait()
+
+    if not peaks:  # video senza audio
+        return {"rate": PEAKS_PER_SEC, "peaks": []}
+    values = np.concatenate(peaks).astype(np.float32)
+    ref = float(np.percentile(values, 99.5)) or 1.0
+    scaled = np.clip(values / ref * 100, 0, 100).round().astype(int)
+    return {"rate": PEAKS_PER_SEC, "peaks": scaled.tolist()}
+
+
+# --------------------------------------------------------------------------
+# 5. Taglio + formato verticale 9:16
+# --------------------------------------------------------------------------
+
+def _even(x: float) -> int:
+    return max(2, int(round(x / 2)) * 2)
+
+
+def vertical_filter(mode: str, src_w: int, src_h: int, crop_x: float) -> str:
+    """
+    mode="crop": ritaglia una finestra 9:16 dal video (crop_x = 0 sinistra, 0.5 centro, 1 destra).
+    mode="blur": video intero al centro con sfondo sfocato sopra e sotto.
+    """
+    if mode == "blur":
+        return (
+            f"split=2[a][b];"
+            f"[a]scale={SHORT_W}:{SHORT_H}:force_original_aspect_ratio=increase,"
+            f"crop={SHORT_W}:{SHORT_H},gblur=sigma=30[bg];"
+            f"[b]scale={SHORT_W}:{SHORT_H}:force_original_aspect_ratio=decrease[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
+        )
+
+    crop_x = min(1.0, max(0.0, crop_x))
+    if src_w / src_h > 9 / 16:  # sorgente orizzontale: si taglia ai lati
+        cw, ch = _even(src_h * 9 / 16), src_h
+        x, y = int((src_w - cw) * crop_x), 0
+    else:  # sorgente già verticale (o più stretta): si taglia sopra/sotto
+        cw, ch = src_w, min(src_h, _even(src_w * 16 / 9))
+        x, y = 0, int((src_h - ch) / 2)
+    return f"crop={cw}:{ch}:{x}:{y},scale={SHORT_W}:{SHORT_H},setsar=1"
+
+
+def export_short(
+    src: Path, out_path: Path, start: float, end: float,
+    src_w: int, src_h: int, mode: str, crop_x: float, progress: ProgressCb,
+) -> None:
+    duration = end - start
+    tmp = out_path.with_suffix(".part.mp4")
+    run_ffmpeg(
+        ["-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{duration:.3f}",
+         "-filter_complex", f"[0:v]{vertical_filter(mode, src_w, src_h, crop_x)}[v]",
+         "-map", "[v]", "-map", "0:a?",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(tmp)],
+        duration, progress, "Esportazione",
+    )
+    tmp.replace(out_path)
