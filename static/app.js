@@ -47,6 +47,10 @@ const state = {
   doneAt: {},
   dismissedJobs: new Set(),
   uploads: [],
+  transcript: null,     // { words: [{ s, e, w }] }
+  subY: 0.8,            // altezza del centro dei sottotitoli (0 = in alto, 1 = in basso)
+  guideUntil: 0,        // fino a quando mostrare l'anteprima di posizione (dopo una modifica)
+  chunks: [],           // gruppi di 2-3 parole, come nei sottotitoli esportati
 };
 
 // ---------------------------------------------------------------------------
@@ -127,10 +131,17 @@ $("video-list").addEventListener("click", (e) => {
   if (li && !li.classList.contains("disabled")) openVideo(li.dataset.id);
 });
 
+let openingId = null;
+
 async function openVideo(id) {
+  // già aperto (o in apertura): non ripartire da capo, si perderebbe la selezione
+  if (openingId === id || (state.video && state.video.id === id)) return;
+  openingId = id;
   let v;
-  try { v = await api(`/api/videos/${id}`); } catch { return; }
-  if (v.status !== "ready") return;
+  try { v = await api(`/api/videos/${id}`); } catch { v = null; }
+  if (openingId !== id) return;   // nel frattempo è stato scelto un altro video
+  openingId = null;
+  if (!v || v.status !== "ready") return;
 
   state.video = v;
   state.playSel = false;
@@ -163,6 +174,7 @@ async function openVideo(id) {
   updateCropBox();
   renderShorts(v.shorts);
   renderVideoList();
+  loadTranscript();
 }
 
 // ---------------------------------------------------------------------------
@@ -237,11 +249,20 @@ async function pollJobs() {
     }
     state.jobsLoaded = true;
     renderJobs(jobs);
+    updateTranscriptStatus();
   } catch { /* server momentaneamente non raggiungibile */ }
   pollTimer = setTimeout(pollJobs, 1500);
 }
 
 async function onJobFinished(job) {
+  if (job.kind === "transcribe") {
+    if (state.video && state.video.id === job.video_id) {
+      const v = await api(`/api/videos/${job.video_id}`);
+      state.video.transcript = v.transcript;
+      loadTranscript();
+    }
+    return;
+  }
   if (job.kind === "short") {
     if (state.video && state.video.id === job.video_id) {
       const v = await api(`/api/videos/${job.video_id}`);
@@ -474,6 +495,7 @@ function updateSelectionUI() {
   const warn = $("sel-warning");
   warn.hidden = len <= MAX_SHORT;
   warn.textContent = "Oltre 3 minuti: YouTube non lo considererà uno Short";
+  scheduleTranscriptRender();
 }
 
 // Anteprima nel player mentre trascini (al massimo un salto per fotogramma)
@@ -485,18 +507,27 @@ function previewSeek(t) {
   seekQueued = t;
 }
 
+/*
+ * Sulla timeline ci sono due strumenti separati:
+ *  - le maniglie gialle (solo se le prendi direttamente) cambiano Inizio/Fine
+ *  - ovunque altro, clic o trascinamento muovono solo la testina bianca (e il player),
+ *    anche dentro l'area gialla, senza toccare la selezione
+ * Maiusc + trascina disegna una selezione nuova.
+ */
 el.inner.addEventListener("pointerdown", (e) => {
   if (!state.video || e.button !== 0) return;
   const t = timeAtClientX(e.clientX);
   const handle = e.target.dataset && e.target.dataset.handle;
-  if (handle) state.drag = { type: handle };
-  else if (e.target === el.sel) state.drag = { type: "move", offset: t - state.sel.start, len: state.sel.end - state.sel.start };
-  else state.drag = { type: "pending", t0: t, x0: e.clientX };
-  state.drag.clientX = e.clientX;
+  // grab = distanza tra il punto in cui prendi la maniglia e il bordo vero: così non "salta"
+  if (handle) state.drag = { type: handle, grab: t - state.sel[handle] };
+  else if (e.shiftKey) state.drag = { type: "new", t0: t };
+  else state.drag = { type: "scrub" };
+  state.drag.clientX = state.drag.x0 = e.clientX;
   el.inner.setPointerCapture(e.pointerId);
   el.player.pause();
   state.playSel = false;
   e.preventDefault();
+  if (state.drag.type === "scrub") seek(t);   // un semplice clic salta lì
   autoScrollLoop();
 });
 
@@ -510,9 +541,7 @@ el.inner.addEventListener("pointerup", (e) => {
   const d = state.drag;
   state.drag = null;
   if (!d) return;
-  if (d.type === "pending") {
-    seek(timeAtClientX(e.clientX));        // semplice clic: sposta la testina
-  } else if (state.sel.end - state.sel.start < MIN_SEL) {
+  if (d.type === "new" && state.sel.end - state.sel.start < MIN_SEL) {
     setSel(state.sel.start, Math.min(duration(), state.sel.start + MIN_SEL));
   }
 });
@@ -521,23 +550,17 @@ function applyDrag() {
   const d = state.drag;
   const t = timeAtClientX(d.clientX);
   const { start, end } = state.sel;
-  if (d.type === "pending") {
-    if (Math.abs(d.clientX - d.x0) < 4) return;
-    d.type = "new";
-  }
-  if (d.type === "new") {
+  if (d.type === "scrub") {
+    seek(t);
+  } else if (d.type === "new") {
     setSel(d.t0, t);
     previewSeek(t);
   } else if (d.type === "start") {
-    setSel(Math.min(t, end - MIN_SEL), end);
+    setSel(Math.min(t - d.grab, end - MIN_SEL), end);
     previewSeek(state.sel.start);
   } else if (d.type === "end") {
-    setSel(start, Math.max(t, start + MIN_SEL));
+    setSel(start, Math.max(t - d.grab, start + MIN_SEL));
     previewSeek(state.sel.end);
-  } else if (d.type === "move") {
-    const s = clamp(t - d.offset, 0, duration() - d.len);
-    setSel(s, s + d.len);
-    previewSeek(s);
   }
 }
 
@@ -545,14 +568,13 @@ function applyDrag() {
 function autoScrollLoop() {
   const d = state.drag;
   if (!d) return;
-  if (d.type !== "pending") {
-    const rect = el.scroll.getBoundingClientRect();
-    const edge = 40;
-    let dx = 0;
-    if (d.clientX > rect.right - edge) dx = (d.clientX - (rect.right - edge)) / 2;
-    else if (d.clientX < rect.left + edge) dx = -((rect.left + edge) - d.clientX) / 2;
-    if (dx) { el.scroll.scrollLeft += dx; applyDrag(); }
-  }
+  const rect = el.scroll.getBoundingClientRect();
+  const edge = 40;
+  let dx = 0;
+  // scorre solo se ti stai davvero muovendo verso quel bordo (non appena prendi una maniglia)
+  if (d.clientX > rect.right - edge && d.clientX > d.x0 + 5) dx = (d.clientX - (rect.right - edge)) / 2;
+  else if (d.clientX < rect.left + edge && d.clientX < d.x0 - 5) dx = -((rect.left + edge) - d.clientX) / 2;
+  if (dx) { el.scroll.scrollLeft += dx; applyDrag(); }
   requestAnimationFrame(autoScrollLoop);
 }
 
@@ -616,6 +638,7 @@ function tick() {
     }
     $("time-now").textContent = fmt(t);
     updatePlayhead();
+    updateSubtitles(t);
     // durante la riproduzione la timeline segue la testina
     if (!el.player.paused && !state.drag) {
       const x = xOf(t) - el.scroll.scrollLeft;
@@ -648,6 +671,7 @@ function updateCropBox() {
   const show = g && el.mode.value === "crop";
   el.cropBox.hidden = !show;
   $("crop-label").hidden = el.mode.value !== "crop" || !g || g.free === 0;
+  layoutSubtitles();
   if (!show) return;
   Object.assign(el.cropBox.style, {
     left: `${g.left}px`, top: `${g.top}px`, width: `${g.width}px`, height: `${g.height}px`,
@@ -689,11 +713,17 @@ new ResizeObserver(() => {
 
 $("btn-create").addEventListener("click", async () => {
   if (!state.video) return;
+  let subtitles = $("subs").checked;
+  if (subtitles && !state.transcript) {
+    if (!confirm("La trascrizione non è ancora pronta. Creo lo Short senza sottotitoli?")) return;
+    subtitles = false;
+  }
   const btn = $("btn-create");
   btn.disabled = true;
   try {
     await api(`/api/videos/${state.video.id}/shorts`, {
-      json: { start: state.sel.start, end: state.sel.end, mode: el.mode.value, crop_x: state.cropX },
+      json: { start: state.sel.start, end: state.sel.end, mode: el.mode.value, crop_x: state.cropX,
+              subtitles, sub_y: state.subY },
     });
     pollJobs();
   } catch (err) {
@@ -715,7 +745,7 @@ function renderShorts(shorts) {
     return `<div class="short-card" data-file="${escapeHtml(s.file)}">
       <video src="${src}" controls preload="metadata"></video>
       <div class="s-info">${fmt(s.start, 1)} → ${fmt(s.end, 1)} · ${(s.end - s.start).toFixed(1)} s ·
-        ${s.mode === "blur" ? "sfondo sfocato" : "ritaglio"}</div>
+        ${s.mode === "blur" ? "sfondo sfocato" : "ritaglio"}${s.subtitles ? " · sottotitoli" : ""}</div>
       <div class="s-actions">
         <a class="btn small" href="${src}?download=1" download="${escapeHtml(s.file)}">Scarica</a>
         <button class="btn small" data-action="reselect" data-start="${s.start}" data-end="${s.end}">Riseleziona</button>
@@ -739,6 +769,243 @@ $("shorts-list").addEventListener("click", async (e) => {
     renderShorts(state.video.shorts);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Trascrizione e sottotitoli
+// ---------------------------------------------------------------------------
+
+// Stesse regole di media.py (chunk_words): cambiale insieme
+const MAX_WORDS_PER_LINE = 3, MAX_CHARS_PER_LINE = 22, MAX_GAP = 0.6, HOLD = 0.4;
+// Posizione e dimensione del testo nello Short 1080x1920 (come ASS_HEADER in media.py)
+const SUB_FONT = 86 / 1920, SUB_MARGIN_SIDE = 70 / 1080;
+// Parte bassa del frame coperta dai pulsanti di Shorts/Reels/TikTok (circa 12-15%)
+const SAFE_BOTTOM = 0.15;
+// Metà altezza di una riga di testo, in frazione del frame: serve per l'avviso
+const SUB_HALF_LINE = (86 * 1.15) / 1920 / 2;
+
+async function loadTranscript() {
+  const id = state.video.id;
+  state.transcript = null;
+  state.chunks = [];
+  if (state.video.transcript === "ready") {
+    try {
+      const data = await api(`/api/videos/${id}/transcript`);
+      if (!state.video || state.video.id !== id) return;
+      state.transcript = data;
+      buildChunks();
+    } catch { /* manca il file: si potrà ritrascrivere */ }
+  }
+  updateTranscriptStatus();
+  renderTranscript();
+}
+
+function buildChunks() {
+  const words = state.transcript.words;
+  const chunks = [];
+  let cur = [];
+  words.forEach((w, i) => {
+    const item = { ...w, i };
+    if (cur.length) {
+      const last = cur[cur.length - 1];
+      const chars = cur.reduce((n, x) => n + x.w.length + 1, 0) + w.w.length;
+      if (cur.length >= MAX_WORDS_PER_LINE || chars > MAX_CHARS_PER_LINE ||
+          w.s - last.e > MAX_GAP || ".?!".includes(last.w.slice(-1)) ||
+          (",;:".includes(last.w.slice(-1)) && cur.length >= 2)) {
+        chunks.push(cur);
+        cur = [];
+      }
+    }
+    cur.push(item);
+  });
+  if (cur.length) chunks.push(cur);
+  chunks.forEach((c, k) => {
+    const next = chunks[k + 1];
+    c.start = c[0].s;
+    c.end = Math.min(c[c.length - 1].e + HOLD, next ? next[0].s : Infinity);
+  });
+  state.chunks = chunks;
+}
+
+/** Indice del primo elemento con valore >= t (lista ordinata). */
+function lowerBound(list, t, key) {
+  let lo = 0, hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (key(list[mid]) < t) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+function updateTranscriptStatus() {
+  if (!state.video) return;
+  const status = state.transcript ? "ready" : state.video.transcript;
+  const job = (state.lastJobs || []).find((j) => j.kind === "transcribe" && j.video_id === state.video.id &&
+                                          (j.status === "queued" || j.status === "running"));
+  let text = "";
+  if (status === "ready") text = `${state.transcript.words.length} parole trascritte`;
+  else if (job) text = job.status === "queued" ? "Trascrizione in coda…" : `${job.step} ${Math.round(job.progress * 100)}%`;
+  else if (status === "error") text = "La trascrizione non è riuscita";
+  else text = "Questo video non è ancora trascritto";
+  $("tr-status").textContent = text;
+  $("btn-transcribe").hidden = status === "ready" || !!job;
+}
+
+$("btn-transcribe").addEventListener("click", async () => {
+  try {
+    await api(`/api/videos/${state.video.id}/transcribe`, { method: "POST" });
+    state.video.transcript = "queued";
+    pollJobs();
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+// --- testo della selezione (aggiornato con un piccolo ritardo mentre trascini)
+let trTimer = null;
+let trSpans = new Map();   // indice parola -> <span>
+let trActive = null;
+
+function scheduleTranscriptRender() {
+  clearTimeout(trTimer);
+  trTimer = setTimeout(renderTranscript, 120);
+}
+
+function renderTranscript() {
+  const box = $("tr-words");
+  trSpans = new Map();
+  trActive = null;
+  if (!state.transcript) { box.innerHTML = ""; return; }
+  const words = state.transcript.words;
+  const from = lowerBound(words, state.sel.start, (w) => w.e);
+  const frag = document.createDocumentFragment();
+  for (let i = from; i < words.length && words[i].s < state.sel.end; i++) {
+    const span = document.createElement("span");
+    span.textContent = words[i].w;
+    span.dataset.i = i;
+    frag.append(span, " ");
+    trSpans.set(i, span);
+  }
+  box.replaceChildren(frag);
+  if (!trSpans.size) box.innerHTML = '<span class="muted">Nessun parlato in questa selezione.</span>';
+}
+
+$("tr-words").addEventListener("click", (e) => {
+  const i = e.target.dataset.i;
+  if (i !== undefined) seek(state.transcript.words[i].s);
+});
+
+$("tr-words").addEventListener("dblclick", async (e) => {
+  const i = Number(e.target.dataset.i);
+  if (isNaN(i)) return;
+  const words = state.transcript.words;
+  const text = prompt("Correggi la parola (lascia vuoto per eliminarla):", words[i].w);
+  if (text === null) return;
+  try {
+    await api(`/api/videos/${state.video.id}/transcript/word`, { json: { index: i, text } });
+    if (text.trim()) words[i].w = text.trim(); else words.splice(i, 1);
+    buildChunks();
+    renderTranscript();
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+// --- anteprima dei sottotitoli sopra il player
+let subChunk = null, subWord = -1;
+
+function currentChunk(t) {
+  const k = lowerBound(state.chunks, t, (c) => c.start) - 1;
+  const c = state.chunks[k];
+  return c && t < c.end ? c : null;
+}
+
+function updateSubtitles(t) {
+  const box = $("sub-preview");
+  const on = $("subs").checked && state.transcript;
+  const c = on ? currentChunk(t) : null;
+  const guide = $("subs").checked && Date.now() < state.guideUntil;
+  $("safe-zone").hidden = !guide;
+  box.hidden = !c && !guide;
+  box.classList.toggle("sample", !c);
+
+  // parola evidenziata nel testo della selezione
+  let wi = -1;
+  if (c) for (const w of c) if (w.s <= t) wi = w.i;
+  const span = trSpans.get(wi) || null;
+  if (span !== trActive) {
+    if (trActive) trActive.classList.remove("on");
+    if (span) span.classList.add("on");
+    trActive = span;
+  }
+
+  if (!c) {
+    // nessuna frase in questo punto: testo di esempio per vedere dove cadrà
+    if (guide && subChunk !== "sample") {
+      box.innerHTML = '<span class="on">Esempio</span> <span>di</span> <span>sottotitolo</span>';
+      subChunk = "sample";
+    } else if (!guide) {
+      subChunk = null;
+    }
+    return;
+  }
+  if (c !== subChunk) {
+    box.innerHTML = c.map((w) => `<span>${escapeHtml(w.w)}</span>`).join(" ");
+    subChunk = c;
+    subWord = -1;
+  }
+  // la parola resta evidenziata finché non inizia la successiva (come nell'export)
+  let active = 0;
+  c.forEach((w, k) => { if (w.s <= t) active = k; });
+  if (active !== subWord) {
+    box.querySelectorAll("span").forEach((s, k) => s.classList.toggle("on", k === active));
+    subWord = active;
+  }
+}
+
+/** Mette l'anteprima dove comparirà nello Short: dentro il riquadro 9:16 (o al centro se sfocato). */
+function layoutSubtitles() {
+  const W = el.player.clientWidth, H = el.player.clientHeight;
+  if (!W || !H) return;
+  let g = el.mode.value === "crop" ? cropGeometry() : null;
+  if (!g) {
+    const w = Math.min(W, (H * 9) / 16);
+    g = { left: (W - w) / 2, top: 0, width: w, height: H };
+  }
+  const font = g.height * SUB_FONT;
+  Object.assign($("sub-preview").style, {
+    left: `${g.left + g.width * SUB_MARGIN_SIDE}px`,
+    width: `${g.width * (1 - 2 * SUB_MARGIN_SIDE)}px`,
+    top: `${g.top + g.height * state.subY}px`,   // il centro del testo (translateY -50% nel CSS)
+    fontSize: `${font}px`,
+  });
+  $("sub-preview").style.setProperty("--stroke", `${Math.max(1.5, font * 0.16)}px`);
+  Object.assign($("safe-zone").style, {
+    left: `${g.left}px`, width: `${g.width}px`,
+    top: `${g.top + g.height * (1 - SAFE_BOTTOM)}px`, height: `${g.height * SAFE_BOTTOM}px`,
+  });
+}
+
+function setSubY(percent, showGuide = true) {
+  state.subY = clamp(percent, 5, 95) / 100;
+  $("sub-y").value = Math.round(state.subY * 100);
+  $("sub-y-val").textContent = `${Math.round(state.subY * 100)}%`;
+  $("sub-y-warn").hidden = state.subY + SUB_HALF_LINE <= 1 - SAFE_BOTTOM;
+  store("subY", state.subY);
+  if (showGuide) state.guideUntil = Date.now() + 2500;
+  layoutSubtitles();
+}
+
+$("sub-y").addEventListener("input", () => setSubY(Number($("sub-y").value)));
+$("sub-pos").addEventListener("click", (e) => {
+  if (e.target.dataset.y) setSubY(Number(e.target.dataset.y));
+});
+// passando col mouse sul controllo si vede subito dove cade il testo
+$("sub-pos").addEventListener("mousemove", () => { state.guideUntil = Date.now() + 1500; });
+$("subs").addEventListener("change", () => {
+  $("sub-pos").classList.toggle("disabled", !$("subs").checked);
+  updateSubtitles(el.player.currentTime || 0);
+});
+setSubY(Number(recall("subY") || 0.8) * 100, false);
 
 // ---------------------------------------------------------------------------
 // Scorciatoie da tastiera

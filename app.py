@@ -70,26 +70,41 @@ def save_meta(meta: dict) -> None:
     write_json(video_dir(meta["id"]) / "meta.json", meta)
 
 
+META_LOCK = threading.Lock()
+
+
+def update_meta(video_id: str, **fields) -> dict:
+    """Aggiorna solo alcuni campi di meta.json (sicuro anche con due lavori in parallelo)."""
+    with META_LOCK:
+        meta = load_meta(video_id)
+        meta.update(fields)
+        save_meta(meta)
+        return meta
+
+
 # --------------------------------------------------------------------------
-# Coda dei lavori: uno alla volta, in background, così il PC non si blocca
+# Code dei lavori, in background, così il PC non si blocca:
+#   JOB_QUEUE        download, analisi, esportazioni (uno alla volta)
+#   TRANSCRIBE_QUEUE trascrizioni (lente): girano in parallelo, così intanto puoi tagliare
 # --------------------------------------------------------------------------
 
 JOBS: dict[str, dict] = {}
 JOB_QUEUE: "queue.Queue[tuple[str, callable]]" = queue.Queue()
+TRANSCRIBE_QUEUE: "queue.Queue[tuple[str, callable]]" = queue.Queue()
 
 
-def submit(kind: str, label: str, video_id: str | None, fn) -> dict:
+def submit(kind: str, label: str, video_id: str | None, fn, q: queue.Queue = JOB_QUEUE) -> dict:
     job = {"id": uuid.uuid4().hex[:10], "kind": kind, "label": label, "video_id": video_id,
            "status": "queued", "progress": 0.0, "step": "In coda", "error": None,
            "created": time.time()}
     JOBS[job["id"]] = job
-    JOB_QUEUE.put((job["id"], fn))
+    q.put((job["id"], fn))
     return job
 
 
-def worker() -> None:
+def worker(q: queue.Queue) -> None:
     while True:
-        job_id, fn = JOB_QUEUE.get()
+        job_id, fn = q.get()
         job = JOBS[job_id]
         job["status"] = "running"
 
@@ -107,22 +122,37 @@ def worker() -> None:
 def analyze_video(video_id: str, progress) -> None:
     """Passi comuni dopo download/import: probe, miniature, waveform."""
     folder = video_dir(video_id)
-    meta = load_meta(video_id)
-    meta["status"] = "processing"
-    save_meta(meta)
+    meta = update_meta(video_id, status="processing")
     try:
         src = folder / meta["file"]
-        meta.update(media.probe(src))
-        save_meta(meta)
+        meta = update_meta(video_id, **media.probe(src))
         thumbs = media.make_thumbnails(src, folder / "thumbs", meta["duration"], progress)
         write_json(folder / "thumbs" / "thumbs.json", thumbs)
         write_json(folder / "peaks.json", media.make_peaks(src, meta["duration"], progress))
-        meta["status"] = "ready"
+        update_meta(video_id, status="ready")
     except Exception as exc:
-        meta["status"], meta["error"] = "error", str(exc)
+        update_meta(video_id, status="error", error=str(exc))
         raise
-    finally:
-        save_meta(meta)
+    if not (folder / "transcript.json").exists():
+        start_transcription(video_id)
+
+
+def start_transcription(video_id: str) -> dict:
+    meta = update_meta(video_id, transcript="queued")
+
+    def run(job, progress):
+        update_meta(video_id, transcript="running")
+        try:
+            folder = video_dir(video_id)
+            data = media.transcribe(folder / meta["file"], meta["duration"], progress)
+            write_json(folder / "transcript.json", data)
+            update_meta(video_id, transcript="ready")
+        except Exception:
+            update_meta(video_id, transcript="error")
+            raise
+
+    return submit("transcribe", "Trascrizione: " + meta.get("title", video_id), video_id, run,
+                  TRANSCRIBE_QUEUE)
 
 
 # --------------------------------------------------------------------------
@@ -225,6 +255,52 @@ def media_file(video_id, name):
 
 
 # --------------------------------------------------------------------------
+# API: trascrizione
+# --------------------------------------------------------------------------
+
+TRANSCRIPT_LOCK = threading.Lock()
+
+
+@app.get("/api/videos/<video_id>/transcript")
+def get_transcript(video_id):
+    data = read_json(video_dir(video_id) / "transcript.json")
+    return jsonify(data) if data else (jsonify(error="Trascrizione non disponibile"), 404)
+
+
+@app.post("/api/videos/<video_id>/transcribe")
+def transcribe_video(video_id):
+    meta = load_meta(video_id)
+    if meta.get("status") != "ready":
+        return jsonify(error="Il video non è ancora pronto"), 400
+    if meta.get("transcript") in ("queued", "running"):
+        return jsonify(error="Trascrizione già in corso"), 400
+    return jsonify(job=start_transcription(video_id))
+
+
+@app.post("/api/videos/<video_id>/transcript/word")
+def edit_word(video_id):
+    """Corregge una parola (testo vuoto = la elimina)."""
+    body = request.get_json(silent=True) or {}
+    path = video_dir(video_id) / "transcript.json"
+    with TRANSCRIPT_LOCK:
+        data = read_json(path)
+        if not data:
+            abort(404)
+        try:
+            i = int(body["index"])
+            word = data["words"][i]
+        except (KeyError, ValueError, TypeError, IndexError):
+            return jsonify(error="Parola non trovata"), 400
+        text = str(body.get("text", "")).strip()
+        if text:
+            word["w"] = text
+        else:
+            del data["words"][i]
+        write_json(path, data)
+    return jsonify(ok=True)
+
+
+# --------------------------------------------------------------------------
 # API: Short
 # --------------------------------------------------------------------------
 
@@ -248,6 +324,13 @@ def create_short(video_id):
         return jsonify(error="Il segmento deve durare almeno 1 secondo"), 400
     mode = body.get("mode") if body.get("mode") in ("crop", "blur") else "crop"
     crop_x = float(body.get("crop_x", 0.5))
+    subtitles = bool(body.get("subtitles"))
+    try:
+        sub_y = min(0.95, max(0.05, float(body.get("sub_y", media.SUB_Y_DEFAULT))))
+    except (TypeError, ValueError):
+        sub_y = media.SUB_Y_DEFAULT
+    if subtitles and not (video_dir(video_id) / "transcript.json").exists():
+        return jsonify(error="Per i sottotitoli serve prima la trascrizione (in corso o da avviare)"), 400
 
     folder = video_dir(video_id)
     shorts_dir = folder / "shorts"
@@ -255,11 +338,14 @@ def create_short(video_id):
     filename = f"short_{fmt_time(start)}-{fmt_time(end)}_{time.strftime('%H%M%S')}.mp4"
 
     def run(job, progress):
+        # la trascrizione si legge ora, così include le correzioni fatte fino all'ultimo
+        words = read_json(folder / "transcript.json", {}).get("words") if subtitles else None
         media.export_short(folder / meta["file"], shorts_dir / filename, start, end,
-                           meta["width"], meta["height"], mode, crop_x, progress)
+                           meta["width"], meta["height"], mode, crop_x, progress, words, sub_y)
         shorts = read_json(shorts_dir / "shorts.json", [])
         shorts.insert(0, {"file": filename, "start": start, "end": end, "mode": mode,
-                          "crop_x": crop_x, "created": time.time()})
+                          "crop_x": crop_x, "subtitles": subtitles, "sub_y": sub_y,
+                          "created": time.time()})
         write_json(shorts_dir / "shorts.json", shorts)
 
     job = submit("short", f"Short {fmt_time(start)}–{fmt_time(end)}", video_id, run)
@@ -292,6 +378,8 @@ def resume_unfinished() -> None:
     """Se l'app è stata chiusa durante un'elaborazione, la riprende."""
     for p in LIBRARY.glob("*/meta.json"):
         meta = read_json(p)
+        if meta and meta.get("status") == "ready" and meta.get("transcript") in ("queued", "running"):
+            start_transcription(meta["id"])
         if not meta or meta.get("status") == "ready":
             continue
         if (p.parent / meta.get("file", "")).is_file():
@@ -307,7 +395,8 @@ def main() -> None:
         raise SystemExit(f"Mancano {', '.join(missing)}: installa ffmpeg e aggiungilo al PATH.")
     media.ensure_ytdlp()
     LIBRARY.mkdir(exist_ok=True)
-    threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=worker, args=(JOB_QUEUE,), daemon=True).start()
+    threading.Thread(target=worker, args=(TRANSCRIBE_QUEUE,), daemon=True).start()
     resume_unfinished()
     url = f"http://{HOST}:{PORT}"
     print(f"\n  Shorts Studio è pronto: {url}\n  (chiudi questa finestra per fermarlo)\n")

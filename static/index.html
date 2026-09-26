@@ -41,6 +41,8 @@
           <div id="player-box" class="player-box">
             <video id="player" preload="auto"></video>
             <div id="crop-box" class="crop-box" title="Trascina per spostare l'inquadratura verticale"></div>
+            <div id="safe-zone" class="safe-zone" hidden><span>Zona coperta da pulsanti e didascalie</span></div>
+            <div id="sub-preview" class="sub-preview" hidden></div>
           </div>
         </div>
 
@@ -78,10 +80,26 @@
             </label>
             <button id="btn-create" class="btn primary big">Crea Short</button>
           </div>
+
+          <div class="subs-controls">
+            <label title="Sottotitoli bruciati nel video, con la parola detta evidenziata">
+              <input id="subs" type="checkbox" checked> Sottotitoli
+            </label>
+            <div id="sub-pos" class="sub-pos">
+              <label for="sub-y">Posizione testo</label>
+              <input id="sub-y" type="range" min="5" max="95" step="1" value="80"
+                     title="Altezza del centro del testo: 0% in alto, 100% in basso">
+              <span id="sub-y-val" class="time">80%</span>
+              <button class="btn small" data-y="20">Alto</button>
+              <button class="btn small" data-y="50">Centro</button>
+              <button class="btn small" data-y="80">Basso</button>
+              <span id="sub-y-warn" class="warning" hidden>Il testo entra nella zona coperta dai pulsanti dell'app</span>
+            </div>
+          </div>
         </div>
 
         <div class="timeline-bar">
-          <span class="muted small-text">Trascina sulla timeline per selezionare · maniglie per rifinire · Ctrl+rotella per lo zoom</span>
+          <span class="muted small-text">Clic o trascina per spostare la testina · maniglie gialle per Inizio/Fine · Maiusc+trascina per una nuova selezione · Ctrl+rotella per lo zoom</span>
           <div class="zoom">
             <button id="btn-zoom-out" class="btn small" title="Riduci zoom">−</button>
             <input id="zoom" type="range" min="0" max="1000" value="500">
@@ -101,6 +119,16 @@
             <div id="tl-playhead" class="tl-playhead"></div>
           </div>
         </div>
+
+        <section class="transcript">
+          <div class="transcript-head">
+            <h2>Testo della selezione</h2>
+            <span id="tr-status" class="muted small-text"></span>
+            <button id="btn-transcribe" class="btn small" hidden>Trascrivi</button>
+          </div>
+          <p class="muted small-text">Clic su una parola per saltare lì · doppio clic per correggerla (lascia vuoto per eliminarla)</p>
+          <div id="tr-words" class="tr-words"></div>
+        </section>
       </div>
     </main>
 

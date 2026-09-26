@@ -156,7 +156,7 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
   border-radius: 8px;
   user-select: none;
 }
-.tl-inner { position: relative; height: 150px; cursor: text; }
+.tl-inner { position: relative; height: 150px; cursor: pointer; }
 .tl-canvas { position: absolute; top: 0; left: 0; height: 150px; pointer-events: none; }
 
 .tl-sel {
@@ -166,9 +166,8 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
   border-top: 3px solid var(--sel);
   border-bottom: 3px solid var(--sel);
   background: rgba(255, 212, 0, .12);
-  cursor: grab;
+  pointer-events: none;   /* clic e trascinamenti passano alla timeline: muovono la testina */
 }
-.tl-sel:active { cursor: grabbing; }
 .handle {
   position: absolute;
   top: -3px;
@@ -176,6 +175,7 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
   width: 14px;
   background: var(--sel);
   cursor: ew-resize;
+  pointer-events: auto;
 }
 .handle::after {
   content: "";
@@ -217,3 +217,51 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
 .short-card .s-info { font-size: 12px; color: var(--muted); margin: 6px 0; }
 .short-card .s-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .short-card .s-actions a { text-decoration: none; }
+
+/* ---------- Sottotitoli: anteprima sul player ---------- */
+.sub-preview {
+  position: absolute;
+  text-align: center;
+  pointer-events: none;
+  line-height: 1.15;
+  font-family: "Arial Black", "Segoe UI Black", Arial, sans-serif;
+  font-weight: 900;
+  text-transform: uppercase;
+  color: #fff;
+  paint-order: stroke fill;
+  -webkit-text-stroke: var(--stroke, 4px) #000;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, .6);
+}
+.sub-preview span { display: inline-block; }
+.sub-preview span.on { color: #ffd700; transform: scale(1.12); }
+
+/* ---------- Testo della selezione ---------- */
+.transcript { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.transcript-head { display: flex; align-items: center; gap: 12px; }
+.transcript-head h2 { margin: 0; }
+.transcript p { margin: 6px 0 8px; }
+.tr-words { line-height: 1.9; max-height: 180px; overflow-y: auto; }
+.tr-words span { padding: 2px 3px; border-radius: 4px; cursor: pointer; }
+.tr-words span:hover { background: var(--panel-2); }
+.tr-words span.on { background: var(--sel); color: #000; }
+
+/* ---------- Posizione dei sottotitoli ---------- */
+.subs-controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; width: 100%; }
+.subs-controls > label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.sub-pos { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); }
+.sub-pos.disabled { opacity: .4; pointer-events: none; }
+.sub-pos input[type=range] { width: 180px; }
+.sub-pos .time { width: 40px; color: var(--text); }
+.sub-preview { transform: translateY(-50%); }
+.sub-preview.sample { opacity: .85; }
+.safe-zone {
+  position: absolute;
+  pointer-events: none;
+  background: repeating-linear-gradient(135deg, rgba(255, 70, 70, .30) 0 8px, rgba(255, 70, 70, .12) 8px 16px);
+  border-top: 2px dashed #ff5c5c;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  line-height: 1.2;
+}
+.safe-zone span { font-size: 11px; color: #fff; background: rgba(0, 0, 0, .6); padding: 2px 6px; margin-bottom: 4px; border-radius: 4px; text-align: center; }
