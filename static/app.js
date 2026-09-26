@@ -233,6 +233,8 @@ async function openVideo(id) {
   setPps(viewSpan() / Math.min(v.duration, 300), 0, 0);
   updateSelectionUI();
   updateCropBox();
+  state.suggestions = [];
+  state.suggestionsReady = false;
   renderShorts(v.shorts);
   renderVideoList();
   loadTranscript();
@@ -347,6 +349,7 @@ async function onJobFinished(job) {
       const v = await api(`/api/videos/${job.video_id}`);
       state.video.shorts = v.shorts;
       renderShorts(v.shorts);
+      renderSuggestions();
     }
     return;
   }
@@ -920,6 +923,7 @@ $("shorts-list").addEventListener("click", async (e) => {
     await api(`/api/videos/${state.video.id}/shorts/${encodeURIComponent(card.dataset.file)}`, { method: "DELETE" });
     state.video.shorts = state.video.shorts.filter((s) => s.file !== card.dataset.file);
     renderShorts(state.video.shorts);
+    renderSuggestions();
   }
 });
 
@@ -1019,6 +1023,25 @@ let trTimer = null;
 let trSpans = new Map();   // indice parola -> <span>
 let trActive = null;
 
+/** Dice quante parole ci sono e se ai bordi della selezione c'è silenzio (lì non ci sono parole da mostrare). */
+function renderTranscriptRange(words, from) {
+  const { start, end } = state.sel;
+  const inside = [];
+  for (let i = from; i < words.length && words[i].s < end; i++) inside.push(words[i]);
+  const el2 = $("tr-range");
+  if (!inside.length) { el2.textContent = ""; return; }
+  const first = inside[0], last = inside[inside.length - 1];
+  let html = `${inside.length} parole, da ${fmt(first.s, 1)} a ${fmt(last.e, 1)}`;
+  const before = first.s - start, after = end - last.e;
+  if (before >= 1.5) html += ` · <span class="gap">${before.toFixed(1)} s senza parole all'inizio</span>`;
+  if (after >= 1.5) {
+    const next = words[from + inside.length];
+    html += ` · <span class="gap">${after.toFixed(1)} s senza parole alla fine` +
+            (next ? ` (la prossima frase inizia a ${fmt(next.s, 1)})` : "") + "</span>";
+  }
+  el2.innerHTML = html;
+}
+
 function scheduleTranscriptRender() {
   clearTimeout(trTimer);
   trTimer = setTimeout(renderTranscript, 120);
@@ -1041,6 +1064,7 @@ function renderTranscript() {
   }
   box.replaceChildren(frag);
   if (!trSpans.size) box.innerHTML = '<span class="muted">Nessun parlato in questa selezione.</span>';
+  renderTranscriptRange(words, from);
 }
 
 $("tr-words").addEventListener("click", (e) => {
@@ -1173,24 +1197,65 @@ async function loadSuggestions() {
   try { data = await api(`/api/videos/${id}/suggestions`); } catch { /* ignora */ }
   if (!state.video || state.video.id !== id) return;
   state.suggestions = data.suggestions;
-  $("sug-status").textContent = !data.ready
-    ? "Arrivano appena finisce la trascrizione"
-    : data.suggestions.length ? `${data.suggestions.length} proposte, la 1 è la più promettente`
-    : "Nessun segmento adatto (serve almeno 30 s di parlato)";
+  state.suggestionsReady = data.ready;
   renderSuggestions();
 }
 
-function renderSuggestions() {
-  const list = state.suggestions;
-  $("tl-sugs").innerHTML = list.map((g, k) =>
-    `<div class="tl-sug" data-k="${k}" title="Clip ${g.rank}: ${fmt(g.start, 1)} → ${fmt(g.end, 1)}\n${escapeHtml(g.reasons.join("\n"))}">${g.rank}</div>`
+/** Un suggerimento è "usato" se almeno metà del suo tratto è già diventata uno Short. */
+function isUsed(g) {
+  return (state.video.shorts || []).some((sh) =>
+    Math.min(g.end, sh.end) - Math.max(g.start, sh.start) >= 0.5 * (g.end - g.start));
+}
+
+function visibleSuggestions() {
+  const hide = $("sug-hide-used").checked;
+  return state.suggestions.map((g, k) => ({ g, k, used: isUsed(g) })).filter((x) => !(hide && x.used));
+}
+
+$("sug-hide-used").checked = recall("hideUsed") === "1";
+$("sug-hide-used").addEventListener("change", () => {
+  store("hideUsed", $("sug-hide-used").checked ? "1" : "0");
+  renderSuggestions();
+});
+
+$("btn-sug-more").addEventListener("click", async () => {
+  const btn = $("btn-sug-more");
+  btn.disabled = true;
+  try {
+    const res = await api(`/api/videos/${state.video.id}/suggestions/more`, { method: "POST" });
+    state.suggestions = res.suggestions;
+    renderSuggestions(res.added ? `+${res.added} nuovi suggerimenti (in viola “nuovo”)`
+                                : "Non ho trovato altri tratti adatti lontani da quelli già proposti");
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function renderSuggestions(note = "") {
+  if (!state.video) return;
+  const all = state.suggestions;
+  const shown = visibleSuggestions();
+  const lastBatch = Math.max(1, ...all.map((g) => g.batch || 1));
+  const usedCount = all.filter(isUsed).length;
+  const hidden = all.length - shown.length;
+  $("sug-status").textContent = note || (!state.suggestionsReady ? "Arrivano appena finisce la trascrizione"
+    : !all.length ? "Nessun segmento adatto (serve almeno 30 s di parlato)"
+    : `${all.length} proposte` + (usedCount ? `, ${usedCount} già usate` : "") + (hidden ? ` (${hidden} nascoste)` : ""));
+  $("btn-sug-more").hidden = !state.suggestionsReady;
+
+  $("tl-sugs").innerHTML = shown.map(({ g, k, used }) =>
+    `<div class="tl-sug ${used ? "used" : ""}" data-k="${k}" title="Clip ${g.rank}${used ? " (già usato per uno Short)" : ""}: ${fmt(g.start, 1)} → ${fmt(g.end, 1)}\n${escapeHtml(g.reasons.join("\n"))}">${g.rank}</div>`
   ).join("");
-  $("sug-list").innerHTML = list.map((g, k) => `
-    <div class="sug-item" data-k="${k}">
+  $("sug-list").innerHTML = shown.map(({ g, k, used }) => `
+    <div class="sug-item ${used ? "used" : ""}" data-k="${k}">
       <div class="sug-top">
         <span class="sug-rank">${g.rank}</span>
         <span class="sug-time">${fmt(g.start, 1)} → ${fmt(g.end, 1)}</span>
         <span class="muted">${(g.end - g.start).toFixed(0)} s</span>
+        ${used ? '<span class="sug-badge">✓ già usato</span>' : ""}
+        ${!used && lastBatch > 1 && g.batch === lastBatch ? '<span class="sug-badge new">nuovo</span>' : ""}
         <span class="sug-score" title="Punteggio dell'euristica, da 0 a 100">${g.score}/100</span>
       </div>
       <div class="sug-preview">“${escapeHtml(g.preview)}…”</div>
@@ -1208,8 +1273,13 @@ function positionSuggestions() {
   document.querySelectorAll(".tl-sug").forEach((div) => {
     const g = state.suggestions[div.dataset.k];
     if (!g) return;
-    div.style.left = `${xOf(g.start)}px`;
-    div.style.width = `${Math.max(14, (g.end - g.start) * state.pps)}px`;
+    // larghezza reale (meno 2 px di stacco): con tanti suggerimenti vicini non si accavallano;
+    // il numero compare solo se c'è spazio (altrimenti è nel suggerimento al passaggio del mouse)
+    const w = Math.max(4, (g.end - g.start) * state.pps - 2);
+    div.style.left = `${xOf(g.start) + 1}px`;
+    div.style.width = `${w}px`;
+    div.style.padding = w >= 18 ? "" : "0";
+    div.style.color = w >= 18 ? "" : "transparent";
   });
 }
 

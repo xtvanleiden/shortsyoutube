@@ -394,15 +394,56 @@ def put_settings():
     return jsonify(settings)
 
 
+SUGGEST_LOCK = threading.Lock()
+
+
+def stored_suggestions(video_id: str, words: list[dict]) -> list[dict]:
+    """
+    I suggerimenti si salvano (suggerimenti.json) per sapere quali sono già stati proposti.
+    Se le parole chiave sono cambiate, si ricalcolano da capo.
+    """
+    path = video_dir(video_id) / "suggerimenti.json"
+    keywords = load_settings()["keywords"]
+    saved = read_json(path)
+    if saved and saved.get("keywords") == keywords:
+        return saved["items"]
+    items = suggest.suggest(words, keywords, load_meta(video_id).get("duration", 0))
+    for item in items:
+        item["batch"] = 1
+    write_json(path, {"keywords": keywords, "items": items})
+    return items
+
+
 @app.get("/api/videos/<video_id>/suggestions")
 def get_suggestions(video_id):
-    meta = load_meta(video_id)
     data = read_json(video_dir(video_id) / "transcript.json")
     if not data:
         return jsonify(ready=False, suggestions=[])
-    # si ricalcola ogni volta (pochi millisecondi): tiene conto di correzioni e parole chiave nuove
-    return jsonify(ready=True, suggestions=suggest.suggest(
-        data["words"], load_settings()["keywords"], meta.get("duration", 0)))
+    with SUGGEST_LOCK:
+        return jsonify(ready=True, suggestions=stored_suggestions(video_id, data["words"]))
+
+
+@app.post("/api/videos/<video_id>/suggestions/more")
+def more_suggestions(video_id):
+    """Altri suggerimenti, lontani da quelli già proposti e dagli Short già creati."""
+    meta = load_meta(video_id)
+    folder = video_dir(video_id)
+    data = read_json(folder / "transcript.json")
+    if not data:
+        return jsonify(error="Serve prima la trascrizione"), 400
+    with SUGGEST_LOCK:
+        items = stored_suggestions(video_id, data["words"])
+        shorts = read_json(folder / "shorts" / "shorts.json", [])
+        exclude = [(g["start"], g["end"]) for g in items] + [(s["start"], s["end"]) for s in shorts]
+        new = suggest.suggest(data["words"], load_settings()["keywords"], meta.get("duration", 0),
+                              exclude=exclude, count=suggest.MORE_BATCH)
+        batch = max((g.get("batch", 1) for g in items), default=0) + 1
+        next_rank = max((g["rank"] for g in items), default=0) + 1
+        for i, item in enumerate(new):
+            item["rank"], item["batch"] = next_rank + i, batch
+        items += new
+        write_json(folder / "suggerimenti.json", {"keywords": load_settings()["keywords"], "items": items})
+    return jsonify(suggestions=items, added=len(new))
 
 
 # --------------------------------------------------------------------------

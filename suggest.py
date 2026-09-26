@@ -12,7 +12,8 @@ Come ragiona:
        - parole chiave (configurabili dalla GUI), con bonus se compaiono nei primi secondi
        - lunghezza ideale 40-65 secondi
        - penalità per silenzi lunghi dentro il clip
-  4. sceglie i migliori senza sovrapposizioni (3-5 a seconda della durata del video)
+  4. sceglie i migliori senza sovrapposizioni: circa uno ogni 6 minuti di video (minimo 3).
+     "Genera altri" ripete la scelta escludendo i tratti già proposti o già usati per uno Short.
 
 I pesi sono qui sotto in PESI: aumentali o diminuiscili per cambiare cosa conta di più.
 """
@@ -92,7 +93,22 @@ def _keyword_hits(norm_text: str, keywords: list[tuple[str, str]]) -> list[str]:
     return hits
 
 
-def suggest(words: list[dict], keywords: list[str], video_duration: float) -> list[dict]:
+MINUTES_PER_SUGGESTION = 6    # un suggerimento ogni 6 minuti di video
+MIN_SUGGESTIONS, MAX_SUGGESTIONS = 3, 25
+MORE_BATCH = 5                 # quanti ne aggiunge "Genera altri suggerimenti"
+
+
+def target_count(video_duration: float) -> int:
+    n = round(video_duration / (MINUTES_PER_SUGGESTION * 60))
+    return max(MIN_SUGGESTIONS, min(MAX_SUGGESTIONS, n))
+
+
+def suggest(words: list[dict], keywords: list[str], video_duration: float,
+            exclude: list[tuple[float, float]] = (), count: int | None = None) -> list[dict]:
+    """
+    `exclude`: tratti (inizio, fine) da non riproporre (suggerimenti già mostrati, Short già fatti).
+    `count`: quanti cercarne (se manca, dipende dalla durata del video).
+    """
     sents = split_sentences(words)
     if not sents or sents[-1]["e"] - sents[0]["s"] < MIN_LEN:
         return []
@@ -139,9 +155,13 @@ def suggest(words: list[dict], keywords: list[str], video_duration: float) -> li
                                "density": density, "before": before[i], "first": i == 0})
 
     # i migliori senza sovrapposizioni
-    target = 3 if video_duration < 600 else 4 if video_duration < 1800 else 5
+    target = count or target_count(video_duration)
+    # si tollera mezzo secondo di contatto ai bordi, non di più
+    blocked = [(a + 0.5, b - 0.5) for a, b in exclude]
     chosen: list[dict] = []
     for c in sorted(candidates, key=lambda c: c["score"], reverse=True):
+        if any(c["start"] < b and c["end"] > a for a, b in blocked):
+            continue
         if all(c["end"] <= o["start"] or c["start"] >= o["end"] for o in chosen):
             chosen.append(c)
             if len(chosen) == target:

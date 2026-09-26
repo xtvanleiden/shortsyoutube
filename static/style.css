@@ -240,7 +240,8 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
 .transcript-head { display: flex; align-items: center; gap: 12px; }
 .transcript-head h2 { margin: 0; }
 .transcript p { margin: 6px 0 8px; }
-.tr-words { line-height: 1.9; max-height: 180px; overflow-y: auto; }
+/* niente scorrimento interno: si vede sempre tutto il testo della selezione */
+.tr-words { line-height: 1.9; }
 .tr-words span { padding: 2px 3px; border-radius: 4px; cursor: pointer; }
 .tr-words span:hover { background: var(--panel-2); }
 .tr-words span.on { background: var(--sel); color: #000; }
@@ -341,3 +342,14 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
 #track-msg.ok { color: #7bd88f; }
 #track-msg.warn { color: #ffb74d; }
 .crop-box.dynamic { border-color: #37d6e6; }
+
+/* ---------- Riepilogo testo selezione, suggerimenti usati ---------- */
+.tr-range { margin: 0 0 6px; color: var(--muted); }
+.tr-range .gap { color: #ffb74d; }
+.sug-hide { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.tl-sug.used { background: #555; color: #ddd; opacity: .6; }
+.tl-sug.used.active { background: var(--sel); color: #000; opacity: 1; }
+.sug-item.used { opacity: .6; }
+.sug-item.used .sug-rank { background: #555; }
+.sug-badge { font-size: 11px; border-radius: 4px; padding: 1px 6px; background: #333; color: var(--muted); }
+.sug-badge.new { background: #7c4dff; color: #fff; }

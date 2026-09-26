@@ -140,6 +140,10 @@
           <div class="transcript-head">
             <h2>Clip suggeriti</h2>
             <span id="sug-status" class="muted small-text"></span>
+            <label class="small-text muted sug-hide" title="Nasconde (anche dalla timeline) i suggerimenti da cui hai già creato uno Short">
+              <input id="sug-hide-used" type="checkbox"> Nascondi quelli già usati
+            </label>
+            <button id="btn-sug-more" class="btn small" title="Cerca altri segmenti, lontani da quelli già proposti e dagli Short già creati">Genera altri suggerimenti</button>
           </div>
           <p class="muted small-text">Scelti in automatico da pause, ritmo del parlato e parole chiave: sono un punto di partenza, rifinisci tu con le maniglie.</p>
           <div id="sug-list" class="sug-list"></div>
@@ -158,6 +162,7 @@
             <button id="btn-transcribe" class="btn small" hidden>Trascrivi</button>
           </div>
           <p class="muted small-text">Clic su una parola per saltare lì · doppio clic per correggerla (lascia vuoto per eliminarla)</p>
+          <p id="tr-range" class="tr-range small-text"></p>
           <div id="tr-words" class="tr-words"></div>
         </section>
       </div>
