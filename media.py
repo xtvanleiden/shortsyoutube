@@ -235,6 +235,16 @@ def make_peaks(src: Path, duration: float, progress: ProgressCb) -> dict:
 _whisper = None
 
 
+def unload_whisper() -> None:
+    """Libera la memoria del modello (~2,3 GB riservati): si ricarica da solo alla prossima trascrizione."""
+    global _whisper
+    if _whisper is not None:
+        import gc
+
+        _whisper = None
+        gc.collect()
+
+
 def transcribe(src: Path, duration: float, progress: ProgressCb) -> dict:
     """Restituisce {"model", "words": [{"s", "e", "w"}, ...]} con i tempi di ogni parola."""
     global _whisper
@@ -328,9 +338,32 @@ def _ass_text(s: str) -> str:
     return s.replace("\\", "").replace("{", "(").replace("}", ")").upper()
 
 
+TITLE_FONTS = ("Arial Black", "Impact", "Segoe UI Black", "Verdana", "Georgia")
+
+
+def _ass_color(hex_rgb: str) -> str:
+    """'#rrggbb' -> '&H00BBGGRR' (in ASS i colori sono al contrario)."""
+    r, g, b = hex_rgb[1:3], hex_rgb[3:5], hex_rgb[5:7]
+    return f"&H00{b}{g}{r}".upper()
+
+
+def _title_style(title: dict) -> str:
+    """Stile ASS del titolo fisso: con la fascia usa BorderStyle 3 (riquadro pieno del colore scelto)."""
+    size = int(title["size"])
+    if title.get("band"):
+        border_style, outline, box = 3, round(size * 0.22), _ass_color(title["band_color"])
+    else:
+        border_style, outline, box = 1, max(2, round(size * 0.07)), "&H00000000"
+    return (f"Style: Title,{title['font']},{size},{_ass_color(title['color'])},&H00FFFFFF,{box},&H64000000,"
+            f"-1,0,0,0,100,100,0,0,{border_style},{outline},0,5,70,70,0,1")
+
+
 def build_ass(words: list[dict], start: float, end: float, out_path: Path,
-              sub_y: float = SUB_Y_DEFAULT) -> None:
-    """Crea il file dei sottotitoli per il segmento [start, end] (tempi relativi alla clip)."""
+              sub_y: float = SUB_Y_DEFAULT, title: dict | None = None) -> None:
+    """
+    Crea il file dei sottotitoli per il segmento [start, end] (tempi relativi alla clip).
+    `title`: testo fisso per tutta la clip ({text, font, size, color, band, band_color, y}).
+    """
     # \an5 = il punto di \pos è il centro del testo (anche se va a capo su due righe)
     pos = rf"{{\an5\pos({SHORT_W // 2},{round(min(0.95, max(0.05, sub_y)) * SHORT_H)})}}"
     clip = [dict(w, s=w["s"] - start, e=w["e"] - start)
@@ -349,7 +382,14 @@ def build_ass(words: list[dict], start: float, end: float, out_path: Path,
                 continue
             text = " ".join((ACTIVE if j == i else NORMAL) + _ass_text(x["w"]) for j, x in enumerate(chunk))
             events.append(f"Dialogue: 0,{_ass_time(a)},{_ass_time(b)},Default,,0,0,0,,{pos}{text}")
-    out_path.write_text(ASS_HEADER + "\n".join(events) + "\n", encoding="utf-8")
+    header = ASS_HEADER
+    if title:
+        header = header.replace("\n\n[Events]", "\n" + _title_style(title) + "\n\n[Events]")
+        y = round(min(0.97, max(0.03, title["y"])) * SHORT_H)
+        text = title["text"].replace("\\", "").replace("{", "(").replace("}", ")")
+        events.append(f"Dialogue: 1,{_ass_time(0)},{_ass_time(clip_len)},Title,,0,0,0,,"
+                      f"{{\\an5\\pos({SHORT_W // 2},{y})}}{text}")
+    out_path.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -392,7 +432,7 @@ def export_short(
     src: Path, out_path: Path, start: float, end: float,
     src_w: int, src_h: int, mode: str, crop_x: float, progress: ProgressCb,
     words: list[dict] | None = None, sub_y: float = SUB_Y_DEFAULT,
-    frame_keys: list[dict] | None = None,
+    frame_keys: list[dict] | None = None, title: dict | None = None,
 ) -> None:
     """
     Taglia [start, end], converte in 9:16 e, se ci sono `words`, brucia i sottotitoli.
@@ -406,8 +446,8 @@ def export_short(
     # il filtro va in un file: con molti punti di inquadratura supererebbe il limite di Windows
     # sulla lunghezza dei comandi (~32.000 caratteri)
     graph = out_path.with_suffix(".filtro.txt")
-    if words:
-        build_ass(words, start, end, ass, sub_y)
+    if words or title:
+        build_ass(words or [], start, end, ass, sub_y, title)
         # ffmpeg gira nella cartella del file .ass: così niente problemi con "C:\" nel filtro
         vf += f",ass={ass.name}"
     graph.write_text(f"[0:v]{vf}[v]", encoding="utf-8")

@@ -166,6 +166,9 @@ def start_transcription(video_id: str) -> dict:
         except Exception:
             update_meta(video_id, transcript="error")
             raise
+        finally:
+            if TRANSCRIBE_QUEUE.empty():   # nessun'altra trascrizione in attesa: libera la memoria
+                media.unload_whisper()
 
     return submit("transcribe", "Trascrizione: " + meta.get("title", video_id), video_id, run,
                   TRANSCRIBE_QUEUE)
@@ -527,6 +530,33 @@ def reframe(video_id):
 # API: Short
 # --------------------------------------------------------------------------
 
+HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def clean_title(raw) -> dict | None:
+    """Controlla il titolo fisso ricevuto dalla pagina (valori sbagliati -> valori di default)."""
+    if not isinstance(raw, dict) or not str(raw.get("text", "")).strip():
+        return None
+
+    def num(key, default, lo, hi):
+        try:
+            return min(hi, max(lo, float(raw.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    color = str(raw.get("color", ""))
+    band_color = str(raw.get("band_color", ""))
+    return {
+        "text": " ".join(str(raw["text"]).split())[:80],
+        "font": raw.get("font") if raw.get("font") in media.TITLE_FONTS else "Arial Black",
+        "size": int(num("size", 90, 30, 200)),
+        "color": color if HEX_COLOR.fullmatch(color) else "#ffffff",
+        "band": bool(raw.get("band")),
+        "band_color": band_color if HEX_COLOR.fullmatch(band_color) else "#d32f2f",
+        "y": num("y", 0.15, 0.03, 0.97),
+    }
+
+
 def fmt_time(t: float) -> str:
     m, s = divmod(int(t), 60)
     return f"{m}m{s:02d}s"
@@ -549,6 +579,7 @@ def create_short(video_id):
     crop_x = float(body.get("crop_x", 0.5))
     subtitles = bool(body.get("subtitles"))
     dynamic = bool(body.get("dynamic")) and mode == "crop"
+    title = clean_title(body.get("title"))
     try:
         sub_y = min(0.95, max(0.05, float(body.get("sub_y", media.SUB_Y_DEFAULT))))
     except (TypeError, ValueError):
@@ -568,10 +599,11 @@ def create_short(video_id):
         frame_keys = load_frame(video_id)["keys"] if dynamic else None
         media.export_short(folder / meta["file"], shorts_dir / filename, start, end,
                            meta["width"], meta["height"], mode, crop_x, progress, words, sub_y,
-                           frame_keys)
+                           frame_keys, title)
         shorts = read_json(shorts_dir / "shorts.json", [])
         shorts.insert(0, {"file": filename, "start": start, "end": end, "mode": mode,
                           "crop_x": crop_x, "dynamic": bool(frame_keys), "subtitles": subtitles, "sub_y": sub_y,
+                          "title": title["text"] if title else None,
                           "created": time.time()})
         write_json(shorts_dir / "shorts.json", shorts)
 

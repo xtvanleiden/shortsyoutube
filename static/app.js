@@ -752,6 +752,7 @@ function tick() {
     $("time-now").textContent = fmt(t);
     updatePlayhead();
     updateSubtitles(t);
+    drawShortPreview();
     if (state.frame.dynamic && state.frame.keys.length) updateCropBox();
     // durante la riproduzione la timeline segue la testina
     if (!el.player.paused && !state.drag) {
@@ -879,7 +880,7 @@ $("btn-create").addEventListener("click", async () => {
   try {
     await api(`/api/videos/${state.video.id}/shorts`, {
       json: { start: state.sel.start, end: state.sel.end, mode: el.mode.value, crop_x: state.cropX,
-              subtitles, sub_y: state.subY, dynamic: state.frame.dynamic },
+              subtitles, sub_y: state.subY, dynamic: state.frame.dynamic, title: exportTitle() },
     });
     pollJobs();
   } catch (err) {
@@ -901,7 +902,7 @@ function renderShorts(shorts) {
     return `<div class="short-card" data-file="${escapeHtml(s.file)}">
       <video src="${src}" controls preload="metadata"></video>
       <div class="s-info">${fmt(s.start, 1)} → ${fmt(s.end, 1)} · ${(s.end - s.start).toFixed(1)} s ·
-        ${s.mode === "blur" ? "sfondo sfocato" : "ritaglio"}${s.dynamic ? " · inquadratura dinamica" : ""}${s.subtitles ? " · sottotitoli" : ""}</div>
+        ${s.mode === "blur" ? "sfondo sfocato" : "ritaglio"}${s.dynamic ? " · inquadratura dinamica" : ""}${s.subtitles ? " · sottotitoli" : ""}${s.title ? ` · titolo “${escapeHtml(s.title)}”` : ""}</div>
       <div class="s-actions">
         <a class="btn small" href="${src}?download=1" download="${escapeHtml(s.file)}">Scarica</a>
         <button class="btn small" data-action="reselect" data-start="${s.start}" data-end="${s.end}">Riseleziona</button>
@@ -1141,23 +1142,41 @@ function updateSubtitles(t) {
   }
 }
 
-/** Mette l'anteprima dove comparirà nello Short: dentro il riquadro 9:16 (o al centro se sfocato). */
-function layoutSubtitles() {
-  const W = el.player.clientWidth, H = el.player.clientHeight;
-  if (!W || !H) return;
-  let g = el.mode.value === "crop" ? cropGeometry() : null;
-  if (!g) {
-    const w = Math.min(W, (H * 9) / 16);
-    g = { left: (W - w) / 2, top: 0, width: w, height: H };
+const fontScaleCache = {};
+/**
+ * Nei sottotitoli .ass la "dimensione" di un carattere è l'altezza dell'intera riga (ascendenti +
+ * discendenti), nel browser è il corpo del carattere. Questo è il rapporto (es. Arial Black 0,71):
+ * serve perché l'anteprima abbia il testo grande esattamente come nel video esportato.
+ */
+function assFontScale(font) {
+  if (!(font in fontScaleCache)) {
+    const c = document.createElement("canvas").getContext("2d");
+    c.font = `100px "${font}"`;
+    const m = c.measureText("Hg");
+    fontScaleCache[font] = 100 / (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent) || 1;
   }
-  const font = g.height * SUB_FONT;
+  return fontScaleCache[font];
+}
+
+/** Dimensiona l'anteprima 9:16 (alta quanto il player) e ci mette sottotitoli, zona coperta e titolo. */
+function layoutSubtitles() {
+  const H = el.player.clientHeight;
+  if (!H) return;
+  const W = Math.round((H * 9) / 16);
+  Object.assign($("short-preview").style, { width: `${W}px`, height: `${H}px` });
+  const g = { left: 0, top: 0, width: W, height: H };
+  layoutTitle(g);
+  const scale = assFontScale("Arial Black");
+  const font = g.height * SUB_FONT * scale;
   Object.assign($("sub-preview").style, {
     left: `${g.left + g.width * SUB_MARGIN_SIDE}px`,
     width: `${g.width * (1 - 2 * SUB_MARGIN_SIDE)}px`,
     top: `${g.top + g.height * state.subY}px`,   // il centro del testo (translateY -50% nel CSS)
     fontSize: `${font}px`,
   });
-  $("sub-preview").style.setProperty("--stroke", `${Math.max(1.5, font * 0.16)}px`);
+  $("sub-preview").style.lineHeight = `${1 / scale}`;
+  // contorno di 7 px su 1920 (come in ASS_HEADER); nel browser il tratto è metà dentro e metà fuori, quindi x2
+  $("sub-preview").style.setProperty("--stroke", `${Math.max(1, (2 * 7 * g.height) / 1920)}px`);
   Object.assign($("safe-zone").style, {
     left: `${g.left}px`, width: `${g.width}px`,
     top: `${g.top + g.height * (1 - SAFE_BOTTOM)}px`, height: `${g.height * SAFE_BOTTOM}px`,
@@ -1185,6 +1204,112 @@ $("subs").addEventListener("change", () => {
   updateSubtitles(el.player.currentTime || 0);
 });
 setSubY(Number(recall("subY") || 0.8) * 100, false);
+
+// ---------------------------------------------------------------------------
+// Anteprima dello Short 9:16 (disegnata dal video del player, come farà ffmpeg)
+// ---------------------------------------------------------------------------
+
+const SHORT_W = 1080, SP_W = 360, SP_H = 640;   // anteprima a 1/3 della risoluzione finale
+const spCtx = $("sp-canvas").getContext("2d");
+
+function drawShortPreview() {
+  const v = el.player;
+  if (!state.video || v.readyState < 2 || !v.videoWidth) return;
+  const vw = v.videoWidth, vh = v.videoHeight;
+  spCtx.filter = "none";
+  if (el.mode.value === "crop") {
+    // stessa finestra di media.vertical_filter("crop"), che segue anche l'inquadratura dinamica
+    if (vw / vh > 9 / 16) {
+      const cw = (vh * 9) / 16;
+      spCtx.drawImage(v, (vw - cw) * currentCropX(), 0, cw, vh, 0, 0, SP_W, SP_H);
+    } else {
+      const ch = Math.min(vh, (vw * 16) / 9);
+      spCtx.drawImage(v, 0, (vh - ch) / 2, vw, ch, 0, 0, SP_W, SP_H);
+    }
+  } else {
+    // blur fill, come media.vertical_filter("blur"): sfondo = video che riempie tutto, sfocato
+    // (gblur sigma 30 su 1080 px), sopra il video intero centrato
+    const blur = (30 * SP_W) / SHORT_W;
+    const cover = Math.max(SP_W / vw, SP_H / vh);
+    const bw = vw * cover + 4 * blur, bh = vh * cover + 4 * blur;   // più grande: niente bordi scuri
+    spCtx.filter = `blur(${blur}px)`;
+    spCtx.drawImage(v, (SP_W - bw) / 2, (SP_H - bh) / 2, bw, bh);
+    spCtx.filter = "none";
+    const fit = Math.min(SP_W / vw, SP_H / vh);
+    spCtx.drawImage(v, (SP_W - vw * fit) / 2, (SP_H - vh * fit) / 2, vw * fit, vh * fit);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Titolo fisso (bruciato nel video per tutta la durata, separato dai sottotitoli)
+// ---------------------------------------------------------------------------
+
+const TITLE_DEFAULTS = { on: false, text: "", font: "Arial Black", size: 90, color: "#ffffff",
+                         band: false, bandColor: "#d32f2f", y: 0.15 };
+state.title = { ...TITLE_DEFAULTS };
+try { Object.assign(state.title, JSON.parse(recall("title") || "{}")); } catch { /* ignora */ }
+
+const titleInputs = {
+  on: ["title-on", "checked"], text: ["title-text", "value"], font: ["title-font", "value"],
+  size: ["title-size", "value"], color: ["title-color", "value"], band: ["title-band", "checked"],
+  bandColor: ["title-band-color", "value"], y: ["title-y", "value"],
+};
+
+function showTitleControls() {
+  for (const [key, [id, prop]] of Object.entries(titleInputs)) {
+    $(id)[prop] = key === "y" ? Math.round(state.title.y * 100) : state.title[key];
+  }
+  $("title-y-val").textContent = `${Math.round(state.title.y * 100)}%`;
+  $("title-opts").classList.toggle("disabled", !state.title.on);
+}
+
+function readTitleControls() {
+  for (const [key, [id, prop]] of Object.entries(titleInputs)) {
+    let v = $(id)[prop];
+    if (key === "size") v = Number(v);
+    if (key === "y") v = Number(v) / 100;
+    state.title[key] = v;
+  }
+  store("title", JSON.stringify(state.title));
+  showTitleControls();
+  layoutSubtitles();
+}
+
+Object.values(titleInputs).forEach(([id]) => $(id).addEventListener("input", readTitleControls));
+showTitleControls();
+
+function layoutTitle(g) {
+  const t = state.title, box = $("title-preview"), span = box.firstElementChild;
+  box.hidden = !(t.on && t.text.trim());
+  if (box.hidden) return;
+  // dimensioni in proporzione al fotogramma 1080x1920, come nel file .ass (_title_style in media.py)
+  const px = g.height / 1920;              // 1 pixel dello Short, nell'anteprima
+  const scale = assFontScale(t.font);
+  const font = t.size * px * scale;
+  span.textContent = t.text;
+  Object.assign(box.style, {
+    left: `${g.left + g.width * SUB_MARGIN_SIDE}px`,
+    width: `${g.width * (1 - 2 * SUB_MARGIN_SIDE)}px`,
+    top: `${g.top + g.height * t.y}px`,
+    fontFamily: `"${t.font}", sans-serif`,
+    fontSize: `${font}px`,
+    lineHeight: `${1 / scale}`,
+    color: t.color,
+  });
+  box.classList.toggle("band", t.band);
+  span.style.background = t.band ? t.bandColor : "";
+  const pad = Math.round(t.size * 0.22) * px;                 // margine della fascia
+  span.style.padding = t.band ? `${pad}px` : "";
+  box.style.setProperty("--stroke", `${2 * Math.max(2, Math.round(t.size * 0.07)) * px}px`);
+}
+
+/** Il titolo da mandare all'esportazione (null se spento o vuoto). */
+function exportTitle() {
+  const t = state.title;
+  if (!t.on || !t.text.trim()) return null;
+  return { text: t.text.trim(), font: t.font, size: t.size, color: t.color,
+           band: t.band, band_color: t.bandColor, y: t.y };
+}
 
 // ---------------------------------------------------------------------------
 // Clip suggeriti (calcolati dal server in suggest.py)
