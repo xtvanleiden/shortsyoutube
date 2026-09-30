@@ -194,6 +194,7 @@ async function deleteVideo(id) {
 
 /** Chiude il video aperto e torna alla schermata iniziale. */
 function closeVideo() {
+  if (state.editor) closeShortEditor();
   el.player.pause();
   el.player.removeAttribute("src");
   el.player.load();
@@ -216,6 +217,7 @@ async function openVideo(id) {
   // già aperto (o in apertura): non ripartire da capo, si perderebbe la selezione
   if (openingId === id || (state.video && state.video.id === id)) return;
   openingId = id;
+  if (state.editor) closeShortEditor();
   let v;
   try { v = await api(`/api/videos/${id}`); } catch { v = null; }
   if (openingId !== id) return;   // nel frattempo è stato scelto un altro video
@@ -360,6 +362,21 @@ async function onJobFinished(job) {
       state.video.transcript = v.transcript;
       loadTranscript();
     }
+    return;
+  }
+  if (job.kind === "short-edit") {
+    if (!state.video || state.video.id !== job.video_id) return;
+    const v = await api(`/api/videos/${job.video_id}`);
+    state.video.shorts = v.shorts;
+    if (state.editor) state.editor.applying = false;
+    if (job.status === "error") {
+      alert("La modifica dello Short non è riuscita: " + job.error);
+      if (state.editor) renderShortEditor();
+    } else if (state.editor && job.result) {
+      await openShortEditor(job.result.file);     // riapre sulla nuova versione
+    }
+    renderShorts(v.shorts);
+    renderSuggestions();
     return;
   }
   if (job.kind === "short") {
@@ -771,6 +788,7 @@ function tick() {
     updatePlayhead();
     updateSubtitles(t);
     drawShortPreview();
+    if (state.editor && !el.player.paused) skipEditorCuts(t);
     if (state.frame.dynamic && state.frame.keys.length) updateCropBox();
     // durante la riproduzione la timeline segue la testina
     if (!el.player.paused && !state.drag) {
@@ -917,12 +935,15 @@ function renderShorts(shorts) {
   const id = state.video.id;
   list.innerHTML = shorts.map((s) => {
     const src = `/media/${id}/shorts/${encodeURIComponent(s.file)}`;
-    return `<div class="short-card" data-file="${escapeHtml(s.file)}">
+    const editing = state.editor && state.editor.file === s.file;
+    return `<div class="short-card ${editing ? "editing" : ""}" data-file="${escapeHtml(s.file)}">
       <video src="${src}" controls preload="metadata"></video>
-      <div class="s-info">${fmt(s.start, 1)} → ${fmt(s.end, 1)} · ${(s.end - s.start).toFixed(1)} s ·
-        ${s.mode === "blur" ? "sfondo sfocato" : "ritaglio"}${s.dynamic ? " · inquadratura dinamica" : ""}${s.subtitles ? " · sottotitoli" : ""}${s.title ? ` · titolo “${escapeHtml(s.title)}”` : ""}</div>
+      <div class="s-info">${fmt(s.start, 1)} → ${fmt(s.end, 1)} · ${(s.duration ?? s.end - s.start).toFixed(1)} s ·
+        ${s.mode === "blur" ? "sfondo sfocato" : "ritaglio"}${s.dynamic ? " · inquadratura dinamica" : ""}${s.subtitles ? " · sottotitoli" : ""}${s.title ? ` · titolo “${escapeHtml(s.title)}”` : ""}${
+          s.version > 1 ? `<span class="s-version"> · versione ${s.version}${s.cut > 0 ? `, ${s.cut.toFixed(1)} s tagliati` : ""}</span>` : ""}</div>
       <div class="s-actions">
         <a class="btn small" href="${src}?download=1" download="${escapeHtml(s.file)}">Scarica</a>
+        <button class="btn small" data-action="edit" title="Correggi i sottotitoli e taglia parole">Modifica</button>
         <button class="btn small" data-action="reselect" data-start="${s.start}" data-end="${s.end}">Riseleziona</button>
         <button class="btn small danger" data-action="delete">Elimina</button>
       </div>
@@ -934,11 +955,14 @@ $("shorts-list").addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-action]");
   if (!btn || !state.video) return;
   const card = btn.closest(".short-card");
-  if (btn.dataset.action === "reselect") {
+  if (btn.dataset.action === "edit") {
+    openShortEditor(card.dataset.file);
+  } else if (btn.dataset.action === "reselect") {
     setSel(Number(btn.dataset.start), Number(btn.dataset.end));
     zoomToSelection();
     seek(state.sel.start);
   } else if (btn.dataset.action === "delete" && confirm("Eliminare questo Short?")) {
+    if (state.editor && state.editor.file === card.dataset.file) closeShortEditor();
     await api(`/api/videos/${state.video.id}/shorts/${encodeURIComponent(card.dataset.file)}`, { method: "DELETE" });
     state.video.shorts = state.video.shorts.filter((s) => s.file !== card.dataset.file);
     renderShorts(state.video.shorts);
@@ -976,12 +1000,19 @@ async function loadTranscript() {
   loadSuggestions();
 }
 
-function buildChunks() {
-  const words = state.transcript.words;
+/**
+ * Gruppi di 2-3 parole per i sottotitoli. `items` = [{s, e, w, i}] (i = indice della parola da
+ * evidenziare); se manca si usa la trascrizione del video (o le parole dello Short in modifica).
+ */
+function buildChunks(items) {
+  if (!items) {
+    if (state.editor) { rebuildEditorChunks(); return; }
+    items = state.transcript.words.map((w, i) => ({ ...w, i }));
+  }
   const chunks = [];
   let cur = [];
-  words.forEach((w, i) => {
-    const item = { ...w, i };
+  items.forEach((w) => {
+    const item = w;
     if (cur.length) {
       const last = cur[cur.length - 1];
       const chars = cur.reduce((n, x) => n + x.w.length + 1, 0) + w.w.length;
@@ -1137,7 +1168,7 @@ function updateSubtitles(t) {
   // parola evidenziata nel testo della selezione
   let wi = -1;
   if (c) for (const w of c) if (w.s <= t) wi = w.i;
-  const span = trSpans.get(wi) || null;
+  const span = (state.editor ? seSpans : trSpans).get(wi) || null;
   if (span !== trActive) {
     if (trActive) trActive.classList.remove("on");
     if (span) span.classList.add("on");
@@ -1607,6 +1638,248 @@ $("split-handle").addEventListener("dblclick", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Editor dello Short: correzione del testo e tagli parola per parola
+// ---------------------------------------------------------------------------
+//
+// Parola: s, e (tempi di Whisper nel video lungo, non cambiano mai), w (testo applicato),
+// del (già tagliata). Modifiche non ancora applicate: text (testo nuovo) e pdel (nuovo stato
+// di taglio). Le regole dei tagli sono quelle di media.cut_intervals (senza la ricerca del
+// punto più silenzioso, che fa il server): cambiale insieme.
+
+const GAP_MIN = 0.06, KEEP_PAUSE = 0.15;
+let seSpans = new Map();
+const seText = (w) => (w.text ?? w.w);
+const seDeleted = (w) => (w.pdel ?? w.del);
+
+function currentSettings() {
+  return { mode: el.mode.value, cropX: state.cropX, subs: $("subs").checked, subY: state.subY,
+           title: { ...state.title } };
+}
+
+function applySettings(x) {
+  el.mode.value = x.mode;
+  state.cropX = x.cropX;
+  el.cropX.value = x.cropX;
+  $("subs").checked = x.subs;
+  $("sub-pos").classList.toggle("disabled", !x.subs);
+  setSubY(x.subY * 100, false);
+  state.title = { ...x.title };
+  showTitleControls();
+  updateCropBox();
+}
+
+function recipeSettings(r) {
+  const t = r.title;
+  return {
+    mode: r.mode, cropX: r.crop_x, subs: r.subtitles, subY: r.sub_y,
+    title: t ? { on: true, text: t.text, font: t.font, size: t.size, color: t.color, band: t.band,
+                 bandColor: t.band_color, y: t.y }
+             : { ...state.title, on: false },
+  };
+}
+
+async function openShortEditor(file) {
+  let recipe;
+  try {
+    recipe = await api(`/api/videos/${state.video.id}/shorts/${encodeURIComponent(file)}/ricetta`);
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
+  if (!state.editor) state.editorSaved = currentSettings();   // per ripristinarle alla chiusura
+  state.editor = {
+    file, recipe, entry: state.video.shorts.find((x) => x.file === file),
+    words: recipe.words.map((w) => ({ ...w, text: null, pdel: null })),
+    selA: -1, selB: -1, cuts: [], applying: false,
+  };
+  applySettings(recipeSettings(recipe));
+  $("short-editor").hidden = false;
+  $("transcript-section").hidden = true;
+  $("editor-bottom").scrollTop = 0;
+  setSel(recipe.start, recipe.end);
+  zoomToSelection();
+  seek(recipe.start);
+  renderShortEditor();
+  renderShorts(state.video.shorts);
+}
+
+function pendingCount(ed) {
+  return ed.words.filter((w) => (w.pdel !== null && w.pdel !== w.del) || (w.text !== null && w.text !== w.w)).length;
+}
+
+function closeShortEditor() {
+  const ed = state.editor;
+  if (!ed) return;
+  state.editor = null;
+  if (state.editorSaved) applySettings(state.editorSaved);
+  $("short-editor").hidden = true;
+  $("transcript-section").hidden = false;
+  if (state.transcript) buildChunks();
+  if (state.video) renderShorts(state.video.shorts);
+}
+
+/** Tratti tagliati (in secondi del video lungo), con le modifiche non ancora applicate. */
+function clientCuts(ed) {
+  const ws = ed.words, n = ws.length, cuts = [];
+  const { start, end } = ed.recipe;
+  for (let i = 0; i < n;) {
+    if (!seDeleted(ws[i])) { i++; continue; }
+    let j = i;
+    while (j + 1 < n && seDeleted(ws[j + 1])) j++;
+    let a, b;
+    if (i === 0) a = start;
+    else {
+      const pe = ws[i - 1].e, s0 = ws[i].s;
+      a = s0 - pe >= GAP_MIN ? Math.min(pe + KEEP_PAUSE, (pe + s0) / 2) : s0;
+    }
+    if (j === n - 1) b = end;
+    else {
+      const we = ws[j].e, ns = ws[j + 1].s;
+      b = ns - we >= GAP_MIN ? Math.max(ns - KEEP_PAUSE, (we + ns) / 2) : we;
+    }
+    cuts.push([Math.max(start, a), Math.min(end, b)]);
+    i = j + 1;
+  }
+  return cuts;
+}
+
+function skipEditorCuts(t) {
+  for (const [a, b] of state.editor.cuts) {
+    if (t >= a && t < b - 0.02) { el.player.currentTime = b; return; }
+  }
+}
+
+function rebuildEditorChunks() {
+  const ed = state.editor;
+  buildChunks(ed.words.map((w, i) => ({ s: w.s, e: w.e, w: seText(w), i }))
+                      .filter((x) => !seDeleted(ed.words[x.i])));
+}
+
+function renderShortEditor() {
+  const ed = state.editor;
+  const lo = Math.min(ed.selA, ed.selB), hi = Math.max(ed.selA, ed.selB);
+  const frag = document.createDocumentFragment();
+  seSpans = new Map();
+  ed.words.forEach((w, i) => {
+    const sp = document.createElement("span");
+    sp.className = "se-w";
+    sp.dataset.i = i;
+    sp.textContent = seText(w);
+    if (w.pdel === true && !w.del) sp.classList.add("pdel");
+    else if (w.pdel === false && w.del) sp.classList.add("prestore");
+    else if (w.del) sp.classList.add("del");
+    const edited = w.text !== null && w.text !== w.w;
+    if (edited) sp.classList.add("edited");
+    if (ed.selA >= 0 && i >= lo && i <= hi) sp.classList.add("sel");
+    sp.title = `${fmt(w.s, 2)} → ${fmt(w.e, 2)}` + (edited ? ` · prima era «${w.w}»` : "");
+    frag.append(sp, " ");
+    seSpans.set(i, sp);
+  });
+  $("se-words").replaceChildren(frag);
+
+  ed.cuts = clientCuts(ed);
+  const cut = ed.cuts.reduce((n, [a, b]) => n + b - a, 0);
+  const pending = pendingCount(ed);
+  $("se-summary").textContent = ed.applying ? "Sto rigenerando lo Short…" :
+    `${pending ? `${pending} modifiche da applicare` : "nessuna modifica in sospeso"} · durata ` +
+    `${(ed.recipe.end - ed.recipe.start - cut).toFixed(1)} s` + (cut > 0.05 ? ` (${cut.toFixed(1)} s tagliati)` : "");
+  $("se-apply").disabled = !pending || ed.applying;
+  $("se-reset").disabled = !pending || ed.applying;
+  $("se-undo").disabled = !(ed.entry && ed.entry.prev_file) || ed.applying;
+  $("se-info").textContent = `${fmt(ed.recipe.start, 1)} → ${fmt(ed.recipe.end, 1)} · versione ${ed.recipe.version || 1}` +
+    (ed.recipe.legacy ? " · Short creato prima dell'editor: stile del titolo e inquadratura dinamica vengono dalle impostazioni attuali" : "");
+  rebuildEditorChunks();
+}
+
+$("se-words").addEventListener("click", (e) => {
+  const i = Number(e.target.dataset.i);
+  const ed = state.editor;
+  if (!ed || isNaN(i)) return;
+  if (e.shiftKey && ed.selA >= 0) ed.selB = i;
+  else { ed.selA = ed.selB = i; seek(ed.words[i].s); }
+  // solo l'evidenziazione: ridisegnare la lista romperebbe il doppio clic (correzione)
+  const lo = Math.min(ed.selA, ed.selB), hi = Math.max(ed.selA, ed.selB);
+  seSpans.forEach((sp, k) => sp.classList.toggle("sel", k >= lo && k <= hi));
+});
+
+$("se-words").addEventListener("dblclick", (e) => {
+  const i = Number(e.target.dataset.i);
+  const ed = state.editor;
+  if (!ed || isNaN(i)) return;
+  const w = ed.words[i];
+  const text = prompt("Correggi la parola (i tempi restano uguali):", seText(w));
+  if (text === null || !text.trim()) return;
+  w.text = text.trim() === w.w ? null : text.trim();
+  renderShortEditor();
+});
+
+/** Segna le parole selezionate da tagliare (true) o da rimettere (false). */
+function markSelection(value) {
+  const ed = state.editor;
+  if (!ed || ed.selA < 0) return;
+  for (let i = Math.min(ed.selA, ed.selB); i <= Math.max(ed.selA, ed.selB); i++) {
+    const w = ed.words[i];
+    w.pdel = value === w.del ? null : value;
+  }
+  if (ed.words.every(seDeleted)) {
+    alert("Non puoi eliminare tutte le parole dello Short.");
+    for (const w of ed.words) if (w.pdel === true) w.pdel = null;
+  }
+  renderShortEditor();
+}
+
+$("se-del").addEventListener("click", () => markSelection(true));
+$("se-restore").addEventListener("click", () => markSelection(false));
+$("se-play").addEventListener("click", () => {
+  const r = state.editor.recipe;
+  setSel(r.start, r.end);
+  playSelection();
+});
+$("se-reset").addEventListener("click", () => {
+  for (const w of state.editor.words) { w.text = null; w.pdel = null; }
+  renderShortEditor();
+});
+$("se-close").addEventListener("click", () => {
+  if (pendingCount(state.editor) && !confirm("Ci sono modifiche non applicate: chiudere e perderle?")) return;
+  closeShortEditor();
+});
+
+$("se-apply").addEventListener("click", async () => {
+  const ed = state.editor;
+  const newCuts = ed.words.filter((w) => w.pdel === true && !w.del).length;
+  if (newCuts && !confirm(`Tagliare ${newCuts} parole dal video e rigenerare lo Short?\n\n` +
+                          "Potrai sempre tornare alla versione precedente.")) return;
+  try {
+    await api(`/api/videos/${state.video.id}/shorts/${encodeURIComponent(ed.file)}/ricetta`, {
+      json: {
+        words: ed.words.map((w) => ({ w: seText(w), del: seDeleted(w) })),
+        settings: { mode: el.mode.value, crop_x: state.cropX, subtitles: $("subs").checked,
+                    sub_y: state.subY, title: exportTitle() },
+      },
+    });
+    ed.applying = true;
+    renderShortEditor();
+    pollJobs();
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+$("se-undo").addEventListener("click", async () => {
+  const ed = state.editor;
+  if (!confirm("Tornare alla versione precedente di questo Short? L'ultima modifica andrà persa.")) return;
+  try {
+    const res = await api(`/api/videos/${state.video.id}/shorts/${encodeURIComponent(ed.file)}/annulla`, { method: "POST" });
+    const v = await api(`/api/videos/${state.video.id}`);
+    state.video.shorts = v.shorts;
+    await openShortEditor(res.file);
+    renderSuggestions();
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Scorciatoie da tastiera
 // ---------------------------------------------------------------------------
 
@@ -1617,6 +1890,10 @@ document.addEventListener("keydown", (e) => {
   else if (key === "i") setStartHere();
   else if (key === "o") setEndHere();
   else if (key === "p") playSelection();
+  else if ((key === "delete" || key === "backspace") && state.editor && state.editor.selA >= 0) {
+    e.preventDefault();
+    markSelection(true);
+  }
   else if (key === "arrowleft" || key === "arrowright") {
     e.preventDefault();
     const step = (e.shiftKey ? 0.1 : 1) * (key === "arrowleft" ? -1 : 1);

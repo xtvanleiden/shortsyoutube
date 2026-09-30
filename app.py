@@ -602,32 +602,206 @@ def create_short(video_id):
     filename = f"short_{fmt_time(start)}-{fmt_time(end)}_{time.strftime('%H%M%S')}.mp4"
 
     def run(job, progress):
-        # la trascrizione si legge ora, così include le correzioni fatte fino all'ultimo
-        words = read_json(folder / "transcript.json", {}).get("words") if subtitles else None
-        # anche i punti di inquadratura si leggono ora (con le ultime modifiche)
-        frame_keys = load_frame(video_id)["keys"] if dynamic else None
-        media.export_short(folder / meta["file"], shorts_dir / filename, start, end,
-                           meta["width"], meta["height"], mode, crop_x, progress, words, sub_y,
-                           frame_keys, title)
-        shorts = read_json(shorts_dir / "shorts.json", [])
-        shorts.insert(0, {"file": filename, "start": start, "end": end, "mode": mode,
-                          "crop_x": crop_x, "dynamic": bool(frame_keys), "subtitles": subtitles, "sub_y": sub_y,
-                          "title": title["text"] if title else None,
-                          "created": time.time()})
-        write_json(shorts_dir / "shorts.json", shorts)
+        # trascrizione e punti di inquadratura si leggono ora, con le ultime correzioni
+        all_words = read_json(folder / "transcript.json", {}).get("words", [])
+        recipe = {
+            "start": start, "end": end, "mode": mode, "crop_x": crop_x, "dynamic": dynamic,
+            "frame_keys": keys_for_range(load_frame(video_id)["keys"], start, end) if dynamic else [],
+            "subtitles": subtitles, "sub_y": sub_y, "title": title,
+            "words": [{"s": w["s"], "e": w["e"], "w": w["w"], "del": False}
+                      for w in all_words if w["e"] > start and w["s"] < end],
+            "version": 1,
+        }
+        duration = render_recipe(folder, meta, recipe, shorts_dir / filename, progress)
+        entry = {"id": uuid.uuid4().hex[:8], "file": filename, "start": start, "end": end, "mode": mode,
+                 "crop_x": crop_x, "dynamic": dynamic, "subtitles": subtitles, "sub_y": sub_y,
+                 "title": title["text"] if title else None, "created": time.time(),
+                 "version": 1, "duration": duration, "cut": 0.0}
+        write_json(recipe_path(shorts_dir, entry), recipe)
+        with SHORTS_LOCK:
+            shorts = read_json(shorts_dir / "shorts.json", [])
+            shorts.insert(0, entry)
+            write_json(shorts_dir / "shorts.json", shorts)
 
     job = submit("short", f"Short {fmt_time(start)}–{fmt_time(end)}", video_id, run)
     return jsonify(job=job)
 
 
+# --------------------------------------------------------------------------
+# Editor dello Short: ogni Short ha una "ricetta" (tratto, impostazioni, parole con i tempi,
+# parole eliminate). Ogni modifica rigenera lo Short dal video lungo; si tiene la versione
+# precedente per poter annullare.
+# --------------------------------------------------------------------------
+
+SHORTS_LOCK = threading.Lock()
+
+
+def keys_for_range(keys: list[dict], a: float, b: float) -> list[dict]:
+    """Punti di inquadratura che servono per il tratto [a, b] (più quello prima e quello dopo)."""
+    keys = sorted(keys, key=lambda k: k["t"])
+    before = [k for k in keys if k["t"] <= a][-1:]
+    after = [k for k in keys if k["t"] > b][:1]
+    return before + [k for k in keys if a < k["t"] <= b] + after
+
+
+def recipe_path(shorts_dir: Path, entry: dict, prev: bool = False) -> Path:
+    key = entry.get("id") or Path(entry["file"]).stem      # gli Short vecchi non hanno un id
+    return shorts_dir / f"{key}.ricetta{'.prev' if prev else ''}.json"
+
+
+def render_recipe(folder: Path, meta: dict, r: dict, out: Path, progress) -> float:
+    """Genera lo Short dalla ricetta (dal video lungo); restituisce la durata finale."""
+    src = folder / meta["file"]
+    keep = None
+    if any(w.get("del") for w in r["words"]):
+        keep = media.keep_segments(r["start"], r["end"], media.cut_intervals(r["words"], r["start"], r["end"], src))
+        if not keep:
+            raise RuntimeError("Hai eliminato tutto il parlato: non resterebbe niente dello Short")
+    return media.export_short(
+        src, out, r["start"], r["end"], meta["width"], meta["height"], r["mode"], r["crop_x"], progress,
+        r["words"] if r["subtitles"] else None, r["sub_y"],
+        r["frame_keys"] if r["dynamic"] and r["frame_keys"] else None, r["title"], keep)
+
+
+def find_short(video_id: str, name: str) -> tuple[Path, list[dict], dict]:
+    shorts_dir = video_dir(video_id) / "shorts"
+    shorts = read_json(shorts_dir / "shorts.json", [])
+    entry = next((x for x in shorts if x["file"] == name), None)
+    if entry is None:
+        abort(404)
+    return shorts_dir, shorts, entry
+
+
+def load_recipe(video_id: str, shorts_dir: Path, entry: dict) -> dict:
+    recipe = read_json(recipe_path(shorts_dir, entry))
+    if recipe:
+        return recipe
+    # Short creato prima dell'editor: si ricostruisce la ricetta con quello che è stato salvato;
+    # stile del titolo e punti di inquadratura vengono dalle impostazioni attuali
+    words = read_json(video_dir(video_id) / "transcript.json", {}).get("words", [])
+    a, b = entry["start"], entry["end"]
+    title = None
+    if entry.get("title"):
+        title = clean_title({"text": entry["title"]})
+    return {
+        "start": a, "end": b, "mode": entry.get("mode", "crop"), "crop_x": entry.get("crop_x", 0.5),
+        "dynamic": bool(entry.get("dynamic")),
+        "frame_keys": keys_for_range(load_frame(video_id)["keys"], a, b) if entry.get("dynamic") else [],
+        "subtitles": bool(entry.get("subtitles")), "sub_y": entry.get("sub_y", media.SUB_Y_DEFAULT),
+        "title": title,
+        "words": [{"s": w["s"], "e": w["e"], "w": w["w"], "del": False} for w in words if w["e"] > a and w["s"] < b],
+        "version": entry.get("version", 1), "legacy": True,
+    }
+
+
+@app.get("/api/videos/<video_id>/shorts/<name>/ricetta")
+def get_recipe(video_id, name):
+    shorts_dir, _shorts, entry = find_short(video_id, name)
+    return jsonify(load_recipe(video_id, shorts_dir, entry))
+
+
+@app.post("/api/videos/<video_id>/shorts/<name>/ricetta")
+def apply_recipe(video_id, name):
+    """Applica le modifiche (testo corretto, parole eliminate, impostazioni) e rigenera lo Short."""
+    meta = load_meta(video_id)
+    shorts_dir, _shorts, entry = find_short(video_id, name)
+    recipe = load_recipe(video_id, shorts_dir, entry)
+    body = request.get_json(silent=True) or {}
+    edits = body.get("words")
+    if not isinstance(edits, list) or len(edits) != len(recipe["words"]):
+        return jsonify(error="Le parole inviate non corrispondono a quelle dello Short: riapri l'editor"), 400
+    new = dict(recipe, words=[dict(w) for w in recipe["words"]])
+    new.pop("legacy", None)
+    for w, e in zip(new["words"], edits):
+        text = " ".join(str(e.get("w", "")).split())[:60]
+        if text:
+            w["w"] = text            # i tempi restano quelli di Whisper
+        w["del"] = bool(e.get("del"))
+    if all(w["del"] for w in new["words"]) and new["words"]:
+        return jsonify(error="Non puoi eliminare tutte le parole dello Short"), 400
+    settings = body.get("settings") or {}
+    if settings.get("mode") in ("crop", "blur"):
+        new["mode"] = settings["mode"]
+        new["dynamic"] = new["dynamic"] and new["mode"] == "crop"
+    for key, lo, hi in (("crop_x", 0.0, 1.0), ("sub_y", 0.05, 0.95)):
+        try:
+            if key in settings:
+                new[key] = min(hi, max(lo, float(settings[key])))
+        except (TypeError, ValueError):
+            pass
+    if "subtitles" in settings:
+        new["subtitles"] = bool(settings["subtitles"])
+    if "title" in settings:
+        new["title"] = clean_title(settings["title"])
+    new["version"] = recipe.get("version", 1) + 1
+
+    base = re.sub(r"_v\d+$", "", Path(entry["file"]).stem)
+    filename = f"{base}_v{new['version']}.mp4"
+
+    def run(job, progress):
+        duration = render_recipe(video_dir(video_id), meta, new, shorts_dir / filename, progress)
+        with SHORTS_LOCK:
+            shorts = read_json(shorts_dir / "shorts.json", [])
+            cur = next((x for x in shorts if x["file"] == name), None)
+            if cur is None:
+                (shorts_dir / filename).unlink(missing_ok=True)
+                raise RuntimeError("Lo Short è stato eliminato nel frattempo")
+            cur.setdefault("id", Path(name).stem)
+            # si tiene solo una versione precedente: quella ancora prima si cancella
+            if cur.get("prev_file"):
+                try:
+                    (shorts_dir / cur["prev_file"]).unlink(missing_ok=True)
+                except OSError:
+                    pass   # file aperto nel browser: pazienza, resta sul disco
+            write_json(recipe_path(shorts_dir, cur, prev=True), recipe)
+            write_json(recipe_path(shorts_dir, cur), new)
+            cur.update(prev_file=name, file=filename, version=new["version"], duration=duration,
+                       cut=round(new["end"] - new["start"] - duration, 2), mode=new["mode"],
+                       crop_x=new["crop_x"], subtitles=new["subtitles"], sub_y=new["sub_y"],
+                       title=new["title"]["text"] if new["title"] else None)
+            write_json(shorts_dir / "shorts.json", shorts)
+        job["result"] = {"file": filename}
+
+    job = submit("short-edit", f"Modifica Short {fmt_time(entry['start'])}–{fmt_time(entry['end'])}", video_id, run)
+    return jsonify(job=job)
+
+
+@app.post("/api/videos/<video_id>/shorts/<name>/annulla")
+def undo_recipe(video_id, name):
+    """Torna alla versione precedente dello Short (una sola volta)."""
+    shorts_dir, _shorts, entry = find_short(video_id, name)
+    prev_recipe = read_json(recipe_path(shorts_dir, entry, prev=True))
+    if not entry.get("prev_file") or not (shorts_dir / entry["prev_file"]).exists() or not prev_recipe:
+        return jsonify(error="Non c'è una versione precedente da ripristinare"), 400
+    with SHORTS_LOCK:
+        shorts = read_json(shorts_dir / "shorts.json", [])
+        cur = next(x for x in shorts if x["file"] == name)
+        write_json(recipe_path(shorts_dir, cur), prev_recipe)
+        recipe_path(shorts_dir, cur, prev=True).unlink(missing_ok=True)
+        cur.update(file=cur["prev_file"], prev_file=None, version=prev_recipe.get("version", 1))
+        write_json(shorts_dir / "shorts.json", shorts)
+    try:
+        (shorts_dir / name).unlink(missing_ok=True)
+    except OSError:
+        pass
+    return jsonify(ok=True, file=cur["file"])
+
+
 @app.delete("/api/videos/<video_id>/shorts/<name>")
 def delete_short(video_id, name):
     shorts_dir = video_dir(video_id) / "shorts"
-    shorts = read_json(shorts_dir / "shorts.json", [])
-    if not any(s["file"] == name for s in shorts):
-        abort(404)
-    write_json(shorts_dir / "shorts.json", [s for s in shorts if s["file"] != name])
-    (shorts_dir / name).unlink(missing_ok=True)
+    with SHORTS_LOCK:
+        shorts = read_json(shorts_dir / "shorts.json", [])
+        entry = next((x for x in shorts if x["file"] == name), None)
+        if entry is None:
+            abort(404)
+        write_json(shorts_dir / "shorts.json", [x for x in shorts if x["file"] != name])
+    for f in (shorts_dir / name, shorts_dir / (entry.get("prev_file") or "_"),
+              recipe_path(shorts_dir, entry), recipe_path(shorts_dir, entry, prev=True)):
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
     return jsonify(ok=True)
 
 

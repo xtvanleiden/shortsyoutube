@@ -118,6 +118,36 @@
 
         <!-- Parte scorrevole: impostazioni, suggerimenti, testo (e future sezioni) -->
         <div id="editor-bottom" class="editor-bottom">
+          <!-- Editor dei sottotitoli di uno Short già creato (compare con "Modifica") -->
+          <section id="short-editor" class="short-editor" hidden>
+            <div class="transcript-head">
+              <h2>Modifica Short</h2>
+              <span id="se-info" class="muted small-text"></span>
+              <button id="se-close" class="btn small se-close">Chiudi editor</button>
+            </div>
+            <p class="muted small-text">
+              Clic su una parola = la selezioni e la senti · Maiusc+clic = seleziona un gruppo ·
+              doppio clic = correggi il testo · <b>Canc</b> o “Elimina” = taglia dal video.
+              Niente cambia finché non premi <b>Applica modifiche</b>. Formato, titolo e posizione dei
+              sottotitoli qui sopra valgono per questo Short.
+            </p>
+            <div class="se-tools">
+              <button id="se-del" class="btn small" title="Segna da tagliare le parole selezionate (tasto Canc)">✂ Elimina</button>
+              <button id="se-restore" class="btn small" title="Rimette le parole selezionate">↺ Ripristina</button>
+              <button id="se-play" class="btn small" title="Riproduce lo Short saltando le parti tagliate">▶ Ascolta con i tagli</button>
+              <span id="se-summary" class="small-text muted"></span>
+              <span class="se-spacer"></span>
+              <button id="se-reset" class="btn small" title="Dimentica le modifiche non ancora applicate">Annulla modifiche</button>
+              <button id="se-undo" class="btn small" title="Rimette la versione dello Short prima dell'ultima modifica">⟲ Versione precedente</button>
+              <button id="se-apply" class="btn primary small">Applica modifiche</button>
+            </div>
+            <div id="se-legend" class="se-legend small-text muted">
+              <span class="se-w pdel">da tagliare</span> <span class="se-w edited">corretta</span>
+              <span class="se-w del">già tagliata</span> <span class="se-w prestore">da rimettere</span>
+            </div>
+            <div id="se-words" class="se-words"></div>
+          </section>
+
           <section class="short-settings">
             <h2>Impostazioni dello Short</h2>
             <div id="frame-controls" class="frame-controls">
@@ -196,7 +226,7 @@
             </details>
           </section>
 
-          <section class="transcript">
+          <section id="transcript-section" class="transcript">
             <div class="transcript-head">
               <h2>Testo della selezione</h2>
               <span id="tr-status" class="muted small-text"></span>

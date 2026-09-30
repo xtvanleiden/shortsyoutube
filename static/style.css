@@ -476,3 +476,23 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
   font-size: 10px; line-height: 1; padding: 3px 5px; border-radius: 3px;
   background: rgba(0, 0, 0, .55); color: #ddd; pointer-events: none;
 }
+
+/* ---------- Editor dello Short ---------- */
+.short-editor { background: var(--panel); border: 2px solid var(--accent); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.short-editor p { margin: 0; }
+.se-close { margin-left: auto; }
+.se-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.se-spacer { flex: 1; }
+.se-legend { display: flex; gap: 10px; flex-wrap: wrap; }
+.se-words { line-height: 2.1; user-select: none; }
+.se-w { padding: 2px 3px; border-radius: 4px; cursor: pointer; }
+.se-w:hover { background: var(--panel-2); }
+.se-w.sel { background: var(--accent); color: #000; }
+.se-w.on { outline: 2px solid var(--sel); }
+.se-w.edited { text-decoration: underline 2px #3ea6ff; text-underline-offset: 3px; }
+.se-w.pdel { text-decoration: line-through 2px #ffb74d; color: #ffb74d; }
+.se-w.del { text-decoration: line-through 2px #ff5c5c; color: #ff5c5c; opacity: .6; }
+.se-w.prestore { text-decoration: underline 2px #7bd88f; text-underline-offset: 3px; color: #7bd88f; }
+.se-w.sel.pdel, .se-w.sel.del, .se-w.sel.prestore { color: #000; }
+.short-card.editing { outline: 2px solid var(--accent); }
+.short-card .s-version { color: var(--accent); }

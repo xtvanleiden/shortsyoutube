@@ -435,42 +435,224 @@ def vertical_filter(mode: str, src_w: int, src_h: int, crop_x: float, keys: list
     return f"crop={cw}:{ch}:{x}:{y},scale={SHORT_W}:{SHORT_H},setsar=1"
 
 
+# --------------------------------------------------------------------------
+# 5b. Tagli dentro lo Short (editor dei sottotitoli)
+# --------------------------------------------------------------------------
+#
+# Lo Short non si taglia mai "a posteriori": si rigenera sempre dal video lungo, tenendo solo
+# alcuni pezzi (keep = [(inizio, fine), ...] in secondi del video lungo). Il tempo nello Short è
+#     tempo originale - somma dei pezzi tagliati prima di quel punto
+# e si ricalcola ogni volta dall'originale, quindi non si accumulano errori.
+
+GAP_MIN = 0.06          # pausa minima tra due parole per tagliare "nel silenzio"
+KEEP_PAUSE = 0.15       # quanta pausa lasciare al massimo su ciascun lato di un taglio
+AUDIO_FADE = 0.015      # dissolvenza audio a ogni giunta (evita i "clic")
+
+
+def _quietest(src: Path, lo: float, hi: float) -> float:
+    """Istante con l'audio più basso tra lo e hi (finestre da 10 ms): lì il taglio non si sente."""
+    if hi - lo < 0.02:
+        return (lo + hi) / 2
+    raw = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{lo:.3f}", "-t", f"{hi - lo:.3f}",
+         "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+        capture_output=True).stdout
+    x = np.frombuffer(raw, np.int16).astype(np.float32)
+    n = len(x) // 160
+    if n < 1:
+        return (lo + hi) / 2
+    rms = np.sqrt((x[: n * 160].reshape(n, 160) ** 2).mean(axis=1))
+    return lo + (int(np.argmin(rms)) + 0.5) * 0.01
+
+
+def cut_intervals(words: list[dict], start: float, end: float, src: Path | None = None) -> list[tuple[float, float]]:
+    """
+    Dai gruppi di parole eliminate ({"del": True}) ai tratti da togliere.
+    Si taglia nella pausa tra le parole, lasciando al massimo KEEP_PAUSE di silenzio per lato;
+    se le parole sono attaccate si cerca il punto più silenzioso (serve `src`), ma solo dal lato
+    della parola eliminata: nel dubbio meglio lasciarne un pezzetto che mozzare una parola da tenere.
+    """
+    cuts = []
+    i, n = 0, len(words)
+    while i < n:
+        if not words[i].get("del"):
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and words[j + 1].get("del"):
+            j += 1
+        # bordo prima del gruppo eliminato
+        if i == 0:
+            a = start
+        else:
+            pe, ws = words[i - 1]["e"], words[i]["s"]
+            if ws - pe >= GAP_MIN:
+                a = min(pe + KEEP_PAUSE, (pe + ws) / 2)
+            elif src is not None:
+                a = _quietest(src, pe - 0.02, min(words[i]["e"], ws + 0.06))
+            else:
+                a = ws
+        # bordo dopo il gruppo eliminato
+        if j == n - 1:
+            b = end
+        else:
+            we, ns = words[j]["e"], words[j + 1]["s"]
+            if ns - we >= GAP_MIN:
+                b = max(ns - KEEP_PAUSE, (we + ns) / 2)
+            elif src is not None:
+                b = _quietest(src, max(words[j]["s"], we - 0.06), ns + 0.02)
+            else:
+                b = we
+        cuts.append((max(start, a), min(end, b)))
+        i = j + 1
+    return cuts
+
+
+def keep_segments(start: float, end: float, cuts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Il contrario dei tagli: i pezzi da tenere, in ordine (quelli più corti di 50 ms si scartano)."""
+    keep, t = [], start
+    for a, b in sorted(cuts):
+        if a > t:
+            keep.append((t, a))
+        t = max(t, b)
+    if end > t:
+        keep.append((t, end))
+    return [(a, b) for a, b in keep if b - a >= 0.05]
+
+
+class TimeMap:
+    """Converte i tempi del video lungo nei tempi dello Short montato (pezzi `keep` uno dopo l'altro)."""
+
+    def __init__(self, keep: list[tuple[float, float]]):
+        self.keep = keep
+        self.offsets, t = [], 0.0
+        for a, b in keep:
+            self.offsets.append(t)
+            t += b - a
+        self.total = t
+
+    def segment(self, t: float) -> int | None:
+        for k, (a, b) in enumerate(self.keep):
+            if a <= t <= b:
+                return k
+        return None
+
+    def to_short(self, t: float, k: int) -> float:
+        a, b = self.keep[k]
+        return self.offsets[k] + min(b, max(a, t)) - a
+
+    def words(self, words: list[dict]) -> list[dict]:
+        """Parole non eliminate, con i tempi dello Short (una parola sta nel pezzo del suo centro)."""
+        out = []
+        for w in words:
+            if w.get("del"):
+                continue
+            k = self.segment((w["s"] + w["e"]) / 2)
+            if k is not None:
+                out.append({"s": self.to_short(w["s"], k), "e": self.to_short(w["e"], k), "w": w["w"]})
+        return out
+
+    def frame_keys(self, keys: list[dict]) -> list[dict]:
+        """
+        Inquadratura dinamica sullo Short montato: si campiona la posizione in ogni pezzo e si
+        semplifica il percorso (a ogni giunta la finestra "salta", come l'immagine).
+        """
+        keys = sorted(keys, key=lambda k: k["t"])
+        out = []
+        for k, (a, b) in enumerate(self.keep):
+            n = max(2, int((b - a) * 10) + 1)
+            pts = [(self.offsets[k] + (b - a) * i / (n - 1), frame_x_at(keys, a + (b - a) * i / (n - 1)))
+                   for i in range(n)]
+            pts = _simplify(pts, eps=0.002)
+            for i, (t, x) in enumerate(pts):
+                out.append({"t": round(t, 3), "x": x, "d": 0.0 if i == 0 else round(t - pts[i - 1][0], 3)})
+        return out
+
+
+def has_audio(src: Path) -> bool:
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                          "-of", "csv=p=0", str(src)], capture_output=True, text=True).stdout
+    return bool(out.strip())
+
+
 def export_short(
     src: Path, out_path: Path, start: float, end: float,
     src_w: int, src_h: int, mode: str, crop_x: float, progress: ProgressCb,
     words: list[dict] | None = None, sub_y: float = SUB_Y_DEFAULT,
     frame_keys: list[dict] | None = None, title: dict | None = None,
-) -> None:
+    keep: list[tuple[float, float]] | None = None,
+) -> float:
     """
     Taglia [start, end], converte in 9:16 e, se ci sono `words`, brucia i sottotitoli.
     `frame_keys`: punti di inquadratura dinamica (tempi assoluti nel video lungo).
+    `keep`: pezzi da tenere (editor dei sottotitoli); se manca si tiene tutto [start, end].
+    Restituisce la durata dello Short.
     """
-    duration = end - start
+    keep = keep or [(start, end)]
+    tmap = TimeMap(keep)
+    total = tmap.total
     tmp = out_path.with_suffix(".part.mp4")
-    keys = clip_keys(frame_keys, start, end) if frame_keys else None
-    vf = vertical_filter(mode, src_w, src_h, crop_x, keys)
     ass = out_path.with_suffix(".ass")
     # il filtro va in un file: con molti punti di inquadratura supererebbe il limite di Windows
     # sulla lunghezza dei comandi (~32.000 caratteri)
     graph = out_path.with_suffix(".filtro.txt")
-    if words or title:
-        build_ass(words or [], start, end, ass, sub_y, title)
+
+    if len(keep) == 1:
+        a, b = keep[0]
+        keys = clip_keys(frame_keys, a, b) if frame_keys else None
+        sub_words = [dict(w, s=w["s"], e=w["e"]) for w in (words or []) if not w.get("del")]
+        sub_start, sub_end = a, b
+    else:
+        keys = tmap.frame_keys(frame_keys) if frame_keys else None
+        sub_words = tmap.words(words or [])
+        sub_start, sub_end = 0.0, total
+
+    vf = vertical_filter(mode, src_w, src_h, crop_x, keys)
+    if sub_words or title:
+        build_ass(sub_words, sub_start, sub_end, ass, sub_y, title)
         # ffmpeg gira nella cartella del file .ass: così niente problemi con "C:\" nel filtro
         vf += f",ass={ass.name}"
-    graph.write_text(f"[0:v]{vf}[v]", encoding="utf-8")
+
+    audio = has_audio(src)
+    first = keep[0][0]
+    if len(keep) == 1:
+        graph.write_text(f"[0:v]{vf}[v]", encoding="utf-8")
+        maps = ["-map", "[v]", "-map", "0:a?"]
+    else:
+        # ogni pezzo tagliato dal video lungo (tempi relativi a `first`, dove parte la lettura),
+        # poi incollati in fila con concat
+        parts, inputs = [], ""
+        for k, (a, b) in enumerate(keep):
+            ra, rb = a - first, b - first
+            parts.append(f"[0:v]trim=start={ra:.3f}:end={rb:.3f},setpts=PTS-STARTPTS[v{k}]")
+            inputs += f"[v{k}]"
+            if audio:
+                fades = []
+                if k > 0:
+                    fades.append(f"afade=t=in:st=0:d={AUDIO_FADE}")
+                if k < len(keep) - 1:
+                    fades.append(f"afade=t=out:st={max(0.0, rb - ra - AUDIO_FADE):.3f}:d={AUDIO_FADE}")
+                chain = ",".join([f"atrim=start={ra:.3f}:end={rb:.3f}", "asetpts=PTS-STARTPTS"] + fades)
+                parts.append(f"[0:a]{chain}[a{k}]")
+                inputs += f"[a{k}]"
+        parts.append(f"{inputs}concat=n={len(keep)}:v=1:a={1 if audio else 0}[vc]" + ("[ac]" if audio else ""))
+        parts.append(f"[vc]{vf}[v]")
+        graph.write_text(";\n".join(parts), encoding="utf-8")
+        maps = ["-map", "[v]"] + (["-map", "[ac]"] if audio else [])
+
     try:
         run_ffmpeg(
-            ["-y", "-ss", f"{start:.3f}", "-i", str(src.resolve()), "-t", f"{duration:.3f}",
-             "-/filter_complex", graph.name,
-             "-map", "[v]", "-map", "0:a?",
+            ["-y", "-ss", f"{first:.3f}", "-i", str(src.resolve()), "-t", f"{keep[-1][1] - first:.3f}",
+             "-/filter_complex", graph.name, *maps,
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(tmp.resolve())],
-            duration, progress, "Esportazione", cwd=out_path.parent,
+            total, progress, "Esportazione", cwd=out_path.parent,
         )
     finally:
         ass.unlink(missing_ok=True)
         graph.unlink(missing_ok=True)
     tmp.replace(out_path)
+    return total
 
 
 # --------------------------------------------------------------------------
