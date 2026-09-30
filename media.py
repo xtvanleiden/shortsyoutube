@@ -313,9 +313,9 @@ MAX_CHARS_PER_LINE = 22
 MAX_GAP = 0.6       # una pausa più lunga di così chiude il gruppo di parole
 HOLD = 0.4          # quanto resta a schermo l'ultimo gruppo dopo l'ultima parola
 
-# Altezza del CENTRO del testo, da 0 (in alto) a 1 (in basso). 0.80 lascia libero il 15% in
-# basso, dove YouTube Shorts/Reels/TikTok mettono pulsanti e didascalie.
-SUB_Y_DEFAULT = 0.80
+# Altezza del CENTRO del testo, da 0 (in alto) a 1 (in basso). 0.65 sta sopra sia i pulsanti
+# (ultimo 15%) sia la didascalia/titolo che YouTube Shorts/Reels/TikTok mostrano in basso.
+SUB_Y_DEFAULT = 0.65
 
 
 def chunk_words(words: list[dict]) -> list[list[dict]]:

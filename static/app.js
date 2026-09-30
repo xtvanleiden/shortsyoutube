@@ -1245,7 +1245,7 @@ function setSubY(percent, showGuide = true) {
   $("sub-y").value = Math.round(state.subY * 100);
   $("sub-y-val").textContent = `${Math.round(state.subY * 100)}%`;
   $("sub-y-warn").hidden = state.subY + SUB_HALF_LINE <= 1 - SAFE_BOTTOM;
-  store("subY", state.subY);
+  store("subY65", state.subY);   // chiave nuova: le posizioni salvate col vecchio default (80%) non valgono più
   if (showGuide) state.guideUntil = Date.now() + 2500;
   layoutSubtitles();
 }
@@ -1260,7 +1260,7 @@ $("subs").addEventListener("change", () => {
   $("sub-pos").classList.toggle("disabled", !$("subs").checked);
   updateSubtitles(el.player.currentTime || 0);
 });
-setSubY(Number(recall("subY") || 0.8) * 100, false);
+setSubY(Number(recall("subY65") || 0.65) * 100, false);
 
 // ---------------------------------------------------------------------------
 // Anteprima dello Short 9:16 (disegnata dal video del player, come farà ffmpeg)
