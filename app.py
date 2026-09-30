@@ -147,8 +147,15 @@ def analyze_video(video_id: str, progress) -> None:
 def download_job(video_id: str, url: str):
     """Lavoro di download + analisi (usato anche per riprendere un download interrotto)."""
     def run(job, progress):
-        src = media.download_youtube(url, video_dir(video_id), progress)
-        update_meta(video_id, file=src.name)
+        try:
+            src = media.download_youtube(url, video_dir(video_id), progress)
+        except Exception as exc:
+            # senza questo il video restava "Download…" per sempre nella lista
+            reason = "connessione lenta o interrotta" if "timed out" in str(exc).lower() else str(exc)[-200:]
+            update_meta(video_id, status="error",
+                        error=f"Download non riuscito ({reason}). Clicca il video per riprovare.")
+            raise
+        update_meta(video_id, file=src.name, error=None)
         analyze_video(video_id, progress)
     return run
 
@@ -162,6 +169,8 @@ def start_transcription(video_id: str) -> dict:
             folder = video_dir(video_id)
             data = media.transcribe(folder / meta["file"], meta["duration"], progress)
             write_json(folder / "transcript.json", data)
+            # i clip suggeriti dipendono dal testo: con una trascrizione nuova si ricalcolano
+            (folder / "suggerimenti.json").unlink(missing_ok=True)
             update_meta(video_id, transcript="ready")
         except Exception:
             update_meta(video_id, transcript="error")

@@ -35,166 +35,179 @@
       </div>
 
       <div id="workspace" class="workspace" hidden>
-        <h1 id="video-title" class="video-title"></h1>
+        <!-- Parte fissa: video, comandi e timeline restano sempre visibili -->
+        <div class="editor-top">
+          <h1 id="video-title" class="video-title"></h1>
 
-        <div class="player-wrap">
-          <div id="player-box" class="player-box">
-            <video id="player" preload="auto"></video>
-            <div id="crop-box" class="crop-box" title="Trascina per spostare l'inquadratura verticale"></div>
-          </div>
-          <!-- Anteprima dello Short 9:16, disegnata in tempo reale dal video qui accanto -->
-          <div class="short-preview-wrap">
-            <div id="short-preview" class="short-preview">
-              <canvas id="sp-canvas" width="360" height="640"></canvas>
-              <div id="title-preview" class="title-preview" hidden><span></span></div>
-              <div id="safe-zone" class="safe-zone" hidden><span>Zona coperta da pulsanti e didascalie</span></div>
-              <div id="sub-preview" class="sub-preview" hidden></div>
+          <div class="player-wrap">
+            <div id="player-box" class="player-box">
+              <video id="player" preload="auto"></video>
+              <div id="crop-box" class="crop-box" title="Trascina per spostare l'inquadratura verticale"></div>
             </div>
-            <div class="muted small-text">Anteprima Short</div>
-          </div>
-        </div>
-
-        <div class="controls">
-          <div class="transport">
-            <button id="btn-play" class="btn icon" title="Play/Pausa (spazio)">▶</button>
-            <button id="btn-play-sel" class="btn" title="Riproduci solo la selezione (P)">▶ Selezione</button>
-            <span id="time-now" class="time">0:00.00</span>
-            <span class="muted">/</span>
-            <span id="time-total" class="time muted">0:00</span>
-          </div>
-
-          <div class="selection">
-            <label>Inizio
-              <input id="in-start" class="time-input" type="text" inputmode="decimal">
-              <button id="btn-set-start" class="btn small" title="Imposta inizio al punto attuale (I)">⇤ qui</button>
-            </label>
-            <label>Fine
-              <input id="in-end" class="time-input" type="text" inputmode="decimal">
-              <button id="btn-set-end" class="btn small" title="Imposta fine al punto attuale (O)">qui ⇥</button>
-            </label>
-            <span class="duration">Durata <b id="sel-duration">0.0 s</b></span>
-            <span id="sel-warning" class="warning" hidden></span>
+            <!-- Anteprima dello Short 9:16, disegnata in tempo reale dal video qui accanto -->
+            <div class="short-preview-wrap">
+              <div id="short-preview" class="short-preview">
+                <canvas id="sp-canvas" width="360" height="640"></canvas>
+              <span class="sp-label">Anteprima Short</span>
+                <div id="title-preview" class="title-preview" hidden><span></span></div>
+                <div id="safe-zone" class="safe-zone" hidden><span>Zona coperta da pulsanti e didascalie</span></div>
+                <div id="sub-preview" class="sub-preview" hidden></div>
+              </div>
+              </div>
           </div>
 
-          <div class="export">
-            <label>Formato
-              <select id="mode">
-                <option value="crop">Ritaglio 9:16 (taglia i lati)</option>
-                <option value="blur">Blur fill 9:16 (video intero, sfondo sfocato)</option>
-              </select>
-            </label>
-            <button id="btn-create" class="btn primary big">Crea Short</button>
-          </div>
-
-          <div id="frame-controls" class="frame-controls">
-            <span class="muted">Inquadratura</span>
-            <div class="seg" role="group">
-              <button class="btn small" data-frame="fixed" title="Il riquadro 9:16 resta fermo per tutto lo Short">Fissa</button>
-              <button class="btn small" data-frame="dynamic" title="Il riquadro si sposta nel tempo, seguendo i punti di inquadratura">Dinamica</button>
+          <div class="controls">
+            <div class="transport">
+              <button id="btn-play" class="btn icon" title="Play/Pausa (spazio)">▶</button>
+              <button id="btn-play-sel" class="btn" title="Riproduci solo la selezione (P)">▶ Selezione</button>
+              <span id="time-now" class="time">0:00.00</span>
+              <span class="muted">/</span>
+              <span id="time-total" class="time muted">0:00</span>
             </div>
-            <label id="crop-label" title="Posizione del riquadro fisso">
-              <input id="crop-x" type="range" min="0" max="1" step="0.01" value="0.5">
-            </label>
-            <span id="dyn-tools" class="dyn-tools">
-              <button id="btn-track" class="btn small" title="Cerca il volto nella selezione e crea i punti di inquadratura in automatico">Segui il volto (selezione)</button>
-              <button id="btn-key-del" class="btn small" title="Elimina il punto di inquadratura vicino alla testina">Rimuovi punto qui</button>
-              <button id="btn-keys-clear" class="btn small" title="Elimina tutti i punti di inquadratura dentro la selezione">Cancella punti nella selezione</button>
-              <span class="muted small-text">Per ricentrare a mano: porta la testina nel punto giusto e trascina il riquadro giallo sul video</span>
-            </span>
-            <span id="track-msg" class="small-text" hidden></span>
+
+            <div class="selection">
+              <label>Inizio
+                <input id="in-start" class="time-input" type="text" inputmode="decimal">
+                <button id="btn-set-start" class="btn small" title="Imposta inizio al punto attuale (I)">⇤ qui</button>
+              </label>
+              <label>Fine
+                <input id="in-end" class="time-input" type="text" inputmode="decimal">
+                <button id="btn-set-end" class="btn small" title="Imposta fine al punto attuale (O)">qui ⇥</button>
+              </label>
+              <span class="duration">Durata <b id="sel-duration">0.0 s</b></span>
+              <span id="sel-warning" class="warning" hidden></span>
+            </div>
+
+
           </div>
 
-          <div class="title-controls">
-            <label title="Testo fisso per tutta la durata dello Short (es. nome del programma o argomento)">
-              <input id="title-on" type="checkbox"> Titolo fisso
-            </label>
-            <div id="title-opts" class="title-opts">
-              <input id="title-text" type="text" maxlength="80" placeholder="Es. CREARE INDUSTRIA">
-              <select id="title-font" title="Carattere">
-                <option>Arial Black</option>
-                <option>Impact</option>
-                <option>Segoe UI Black</option>
-                <option>Verdana</option>
-                <option>Georgia</option>
-              </select>
-              <label title="Dimensione del titolo">Dim. <input id="title-size" type="range" min="40" max="160" value="90"></label>
-              <label title="Colore del testo">Colore <input id="title-color" type="color" value="#ffffff"></label>
-              <label title="Fascia colorata dietro al testo"><input id="title-band" type="checkbox"> Fascia
-                <input id="title-band-color" type="color" value="#d32f2f"></label>
-              <label title="Altezza del titolo: 0% in alto, 100% in basso">Posizione
-                <input id="title-y" type="range" min="3" max="95" value="15"> <span id="title-y-val" class="time">15%</span></label>
+          <div class="timeline-bar">
+            <div class="zoom">
+              <button id="btn-zoom-out" class="btn small" title="Riduci zoom">−</button>
+              <input id="zoom" type="range" min="0" max="1000" value="500">
+              <button id="btn-zoom-in" class="btn small" title="Aumenta zoom">+</button>
+              <button id="btn-fit" class="btn small">Tutto il video</button>
+              <button id="btn-zoom-sel" class="btn small">Zoom selezione</button>
+              <span class="help" tabindex="0" title="Clic o trascina sulla timeline per spostare la testina &#10;Maniglie gialle = Inizio/Fine &#10;Maiusc + trascina = nuova selezione &#10;Ctrl + rotella = zoom &#10;Barre viola = clip suggeriti (clic per selezionarli)">?</span>
+            </div>
+            <div class="export">
+              <label>Formato
+                <select id="mode">
+                  <option value="crop" title="Taglia i lati del video orizzontale">Ritaglio 9:16</option>
+                  <option value="blur" title="Video intero al centro, sopra e sotto lo stesso video sfocato">Blur fill 9:16</option>
+                </select>
+              </label>
+              <button id="btn-create" class="btn primary">Crea Short</button>
             </div>
           </div>
 
-          <div class="subs-controls">
-            <label title="Sottotitoli bruciati nel video, con la parola detta evidenziata">
-              <input id="subs" type="checkbox" checked> Sottotitoli
-            </label>
-            <div id="sub-pos" class="sub-pos">
-              <label for="sub-y">Posizione testo</label>
-              <input id="sub-y" type="range" min="5" max="95" step="1" value="80"
-                     title="Altezza del centro del testo: 0% in alto, 100% in basso">
-              <span id="sub-y-val" class="time">80%</span>
-              <button class="btn small" data-y="20">Alto</button>
-              <button class="btn small" data-y="50">Centro</button>
-              <button class="btn small" data-y="80">Basso</button>
-              <span id="sub-y-warn" class="warning" hidden>Il testo entra nella zona coperta dai pulsanti dell'app</span>
+          <div id="tl-scroll" class="tl-scroll">
+            <div id="tl-inner" class="tl-inner">
+              <canvas id="tl-canvas" class="tl-canvas"></canvas>
+              <div id="tl-sugs"></div>
+              <div id="tl-sel" class="tl-sel">
+                <div class="handle left" data-handle="start"></div>
+                <div class="handle right" data-handle="end"></div>
+              </div>
+              <div id="tl-playhead" class="tl-playhead"></div>
             </div>
           </div>
         </div>
 
-        <div class="timeline-bar">
-          <span class="muted small-text">Clic o trascina per spostare la testina · maniglie gialle per Inizio/Fine · Maiusc+trascina per una nuova selezione · Ctrl+rotella per lo zoom</span>
-          <div class="zoom">
-            <button id="btn-zoom-out" class="btn small" title="Riduci zoom">−</button>
-            <input id="zoom" type="range" min="0" max="1000" value="500">
-            <button id="btn-zoom-in" class="btn small" title="Aumenta zoom">+</button>
-            <button id="btn-fit" class="btn small">Tutto il video</button>
-            <button id="btn-zoom-sel" class="btn small">Zoom selezione</button>
-          </div>
-        </div>
+        <div id="split-handle" class="split-handle" title="Trascina per cambiare l'altezza del video"></div>
 
-        <div id="tl-scroll" class="tl-scroll">
-          <div id="tl-inner" class="tl-inner">
-            <canvas id="tl-canvas" class="tl-canvas"></canvas>
-            <div id="tl-sugs"></div>
-            <div id="tl-sel" class="tl-sel">
-              <div class="handle left" data-handle="start"></div>
-              <div class="handle right" data-handle="end"></div>
+        <!-- Parte scorrevole: impostazioni, suggerimenti, testo (e future sezioni) -->
+        <div id="editor-bottom" class="editor-bottom">
+          <section class="short-settings">
+            <h2>Impostazioni dello Short</h2>
+            <div id="frame-controls" class="frame-controls">
+              <span class="muted">Inquadratura</span>
+              <div class="seg" role="group">
+                <button class="btn small" data-frame="fixed" title="Il riquadro 9:16 resta fermo per tutto lo Short">Fissa</button>
+                <button class="btn small" data-frame="dynamic" title="Il riquadro si sposta nel tempo, seguendo i punti di inquadratura">Dinamica</button>
+              </div>
+              <label id="crop-label" title="Posizione del riquadro fisso">
+                <input id="crop-x" type="range" min="0" max="1" step="0.01" value="0.5">
+              </label>
+              <span id="dyn-tools" class="dyn-tools">
+                <button id="btn-track" class="btn small" title="Cerca il volto nella selezione e crea i punti di inquadratura in automatico">Segui il volto (selezione)</button>
+                <button id="btn-key-del" class="btn small" title="Elimina il punto di inquadratura vicino alla testina">Rimuovi punto qui</button>
+                <button id="btn-keys-clear" class="btn small" title="Elimina tutti i punti di inquadratura dentro la selezione">Cancella punti nella selezione</button>
+                <span class="muted small-text">Per ricentrare a mano: porta la testina nel punto giusto e trascina il riquadro giallo sul video</span>
+              </span>
+              <span id="track-msg" class="small-text" hidden></span>
             </div>
-            <div id="tl-playhead" class="tl-playhead"></div>
-          </div>
+
+            <div class="title-controls">
+              <label title="Testo fisso per tutta la durata dello Short (es. nome del programma o argomento)">
+                <input id="title-on" type="checkbox"> Titolo fisso
+              </label>
+              <div id="title-opts" class="title-opts">
+                <input id="title-text" type="text" maxlength="80" placeholder="Es. CREARE INDUSTRIA">
+                <select id="title-font" title="Carattere">
+                  <option>Arial Black</option>
+                  <option>Impact</option>
+                  <option>Segoe UI Black</option>
+                  <option>Verdana</option>
+                  <option>Georgia</option>
+                </select>
+                <label title="Dimensione del titolo">Dim. <input id="title-size" type="range" min="40" max="160" value="90"></label>
+                <label title="Colore del testo">Colore <input id="title-color" type="color" value="#ffffff"></label>
+                <label title="Fascia colorata dietro al testo"><input id="title-band" type="checkbox"> Fascia
+                  <input id="title-band-color" type="color" value="#d32f2f"></label>
+                <label title="Altezza del titolo: 0% in alto, 100% in basso">Posizione
+                  <input id="title-y" type="range" min="3" max="95" value="15"> <span id="title-y-val" class="time">15%</span></label>
+              </div>
+            </div>
+
+            <div class="subs-controls">
+              <label title="Sottotitoli bruciati nel video, con la parola detta evidenziata">
+                <input id="subs" type="checkbox" checked> Sottotitoli
+              </label>
+              <div id="sub-pos" class="sub-pos">
+                <label for="sub-y">Posizione testo</label>
+                <input id="sub-y" type="range" min="5" max="95" step="1" value="80"
+                       title="Altezza del centro del testo: 0% in alto, 100% in basso">
+                <span id="sub-y-val" class="time">80%</span>
+                <button class="btn small" data-y="20">Alto</button>
+                <button class="btn small" data-y="50">Centro</button>
+                <button class="btn small" data-y="80">Basso</button>
+                <span id="sub-y-warn" class="warning" hidden>Il testo entra nella zona coperta dai pulsanti dell'app</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="suggestions">
+            <div class="transcript-head">
+              <h2>Clip suggeriti</h2>
+              <span id="sug-status" class="muted small-text"></span>
+              <label class="small-text muted sug-hide" title="Nasconde (anche dalla timeline) i suggerimenti da cui hai già creato uno Short">
+                <input id="sug-hide-used" type="checkbox"> Nascondi quelli già usati
+              </label>
+              <button id="btn-sug-more" class="btn small" title="Cerca altri segmenti, lontani da quelli già proposti e dagli Short già creati">Genera altri suggerimenti</button>
+            </div>
+            <p class="muted small-text">Scelti in automatico da pause, ritmo del parlato e parole chiave: sono un punto di partenza, rifinisci tu con le maniglie.</p>
+            <div id="sug-list" class="sug-list"></div>
+            <details class="keywords">
+              <summary>Parole chiave <span id="kw-count" class="muted"></span></summary>
+              <p class="muted small-text">Una per riga. Contano nomi delle iniziative e frasi tipo “dovete sapere che”. Maiuscole e accenti non contano.</p>
+              <textarea id="kw-text" rows="8" spellcheck="false"></textarea>
+              <button id="btn-kw-save" class="btn small">Salva e ricalcola</button>
+            </details>
+          </section>
+
+          <section class="transcript">
+            <div class="transcript-head">
+              <h2>Testo della selezione</h2>
+              <span id="tr-status" class="muted small-text"></span>
+              <button id="btn-transcribe" class="btn small" hidden>Trascrivi</button>
+            </div>
+            <p class="muted small-text">Clic su una parola per saltare lì · doppio clic per correggerla (lascia vuoto per eliminarla)</p>
+            <p id="tr-range" class="tr-range small-text"></p>
+            <div id="tr-words" class="tr-words"></div>
+          </section>
         </div>
 
-        <section class="suggestions">
-          <div class="transcript-head">
-            <h2>Clip suggeriti</h2>
-            <span id="sug-status" class="muted small-text"></span>
-            <label class="small-text muted sug-hide" title="Nasconde (anche dalla timeline) i suggerimenti da cui hai già creato uno Short">
-              <input id="sug-hide-used" type="checkbox"> Nascondi quelli già usati
-            </label>
-            <button id="btn-sug-more" class="btn small" title="Cerca altri segmenti, lontani da quelli già proposti e dagli Short già creati">Genera altri suggerimenti</button>
-          </div>
-          <p class="muted small-text">Scelti in automatico da pause, ritmo del parlato e parole chiave: sono un punto di partenza, rifinisci tu con le maniglie.</p>
-          <div id="sug-list" class="sug-list"></div>
-          <details class="keywords">
-            <summary>Parole chiave <span id="kw-count" class="muted"></span></summary>
-            <p class="muted small-text">Una per riga. Contano nomi delle iniziative e frasi tipo “dovete sapere che”. Maiuscole e accenti non contano.</p>
-            <textarea id="kw-text" rows="8" spellcheck="false"></textarea>
-            <button id="btn-kw-save" class="btn small">Salva e ricalcola</button>
-          </details>
-        </section>
-
-        <section class="transcript">
-          <div class="transcript-head">
-            <h2>Testo della selezione</h2>
-            <span id="tr-status" class="muted small-text"></span>
-            <button id="btn-transcribe" class="btn small" hidden>Trascrivi</button>
-          </div>
-          <p class="muted small-text">Clic su una parola per saltare lì · doppio clic per correggerla (lascia vuoto per eliminarla)</p>
-          <p id="tr-range" class="tr-range small-text"></p>
-          <div id="tr-words" class="tr-words"></div>
-        </section>
       </div>
     </main>
 

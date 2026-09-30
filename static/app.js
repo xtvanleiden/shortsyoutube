@@ -142,7 +142,25 @@ $("video-list").addEventListener("click", (e) => {
   if (!li) return;
   if (e.target.closest(".v-del")) deleteVideo(li.dataset.id);
   else if (!li.classList.contains("disabled")) openVideo(li.dataset.id);
+  else retryVideo(li.dataset.id);
 });
+
+/** Video in errore scaricato da YouTube: riprova il download (riparte da dove si era fermato). */
+async function retryVideo(id) {
+  const v = state.videos.find((x) => x.id === id);
+  if (!v || v.status !== "error" || !v.source_url) return;
+  if (!confirm(`Riprovare il download di "${v.title}"?
+
+${v.error || ""}`)) return;
+  try {
+    const res = await api("/api/videos/url", { json: { url: v.source_url } });
+    state.pendingOpen = res.video_id;
+    await loadVideos();
+    pollJobs();
+  } catch (err) {
+    alert(err.message);
+  }
+}
 
 async function deleteVideo(id) {
   const v = state.videos.find((x) => x.id === id);
@@ -1000,16 +1018,24 @@ function updateTranscriptStatus() {
   const status = state.transcript ? "ready" : state.video.transcript;
   const job = (state.lastJobs || []).find((j) => j.kind === "transcribe" && j.video_id === state.video.id &&
                                           (j.status === "queued" || j.status === "running"));
+  // trascrizioni fatte con la vecchia modalità "a lotti", che poteva saltare dei pezzi di parlato
+  const old = status === "ready" && !state.transcript.metodo;
   let text = "";
-  if (status === "ready") text = `${state.transcript.words.length} parole trascritte`;
-  else if (job) text = job.status === "queued" ? "Trascrizione in coda…" : `${job.step} ${Math.round(job.progress * 100)}%`;
+  if (job) text = job.status === "queued" ? "Trascrizione in coda…" : `${job.step} ${Math.round(job.progress * 100)}%`;
+  else if (status === "ready") text = `${state.transcript.words.length} parole trascritte` +
+    (old ? " · fatta col metodo vecchio, che può aver saltato dei pezzi: consigliato Ritrascrivi" : "");
   else if (status === "error") text = "La trascrizione non è riuscita";
   else text = "Questo video non è ancora trascritto";
   $("tr-status").textContent = text;
-  $("btn-transcribe").hidden = status === "ready" || !!job;
+  $("tr-status").classList.toggle("warning", old && !job);
+  $("btn-transcribe").hidden = !!job;
+  $("btn-transcribe").textContent = status === "ready" ? "Ritrascrivi" : "Trascrivi";
 }
 
 $("btn-transcribe").addEventListener("click", async () => {
+  if (state.transcript && !confirm("Rifare la trascrizione di questo video?\n\n" +
+      "Le correzioni fatte a mano alle parole andranno perse e i clip suggeriti verranno ricalcolati. " +
+      "Ci vogliono circa 15 minuti per ogni ora di video; intanto puoi continuare a lavorare.")) return;
   try {
     await api(`/api/videos/${state.video.id}/transcribe`, { method: "POST" });
     state.video.transcript = "queued";
@@ -1542,6 +1568,42 @@ $("btn-keys-clear").addEventListener("click", () => {
   if (!confirm(`Eliminare ${inside} punti di inquadratura nella selezione?`)) return;
   state.frame.keys = state.frame.keys.filter((k) => k.t < start || k.t > end);
   saveFrame();
+});
+
+// ---------------------------------------------------------------------------
+// Barra tra la parte fissa e quella scorrevole: trascinandola cambia l'altezza del video
+// (doppio clic = torna all'altezza di base). L'altezza scelta viene ricordata.
+// ---------------------------------------------------------------------------
+
+const PLAYER_MIN_H = 140;
+
+function setPlayerHeight(px) {
+  const h = clamp(px, PLAYER_MIN_H, Math.max(PLAYER_MIN_H, window.innerHeight * 0.6));
+  document.documentElement.style.setProperty("--player-h", `${Math.round(h)}px`);
+  store("playerH", String(Math.round(h)));
+}
+
+if (Number(recall("playerH"))) setPlayerHeight(Number(recall("playerH")));
+
+$("split-handle").addEventListener("pointerdown", (e) => {
+  const handle = $("split-handle");
+  const startY = e.clientY, startH = el.player.clientHeight || window.innerHeight * 0.3;
+  handle.setPointerCapture(e.pointerId);
+  handle.classList.add("dragging");
+  const move = (ev) => setPlayerHeight(startH + (ev.clientY - startY));
+  const up = () => {
+    handle.classList.remove("dragging");
+    handle.removeEventListener("pointermove", move);
+    handle.removeEventListener("pointerup", up);
+  };
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", up);
+  e.preventDefault();
+});
+
+$("split-handle").addEventListener("dblclick", () => {
+  document.documentElement.style.removeProperty("--player-h");
+  store("playerH", "");
 });
 
 // ---------------------------------------------------------------------------

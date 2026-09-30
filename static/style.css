@@ -384,3 +384,95 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
   -webkit-box-decoration-break: clone;
 }
 .title-preview.band span { -webkit-text-stroke: 0; }
+
+/* ==========================================================================
+   Editor: parte FISSA in alto (video, comandi, timeline) e parte SCORREVOLE
+   sotto (impostazioni, suggerimenti, testo, sezioni future)
+   ========================================================================== */
+.editor { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.empty { padding: 14px 18px; }
+.workspace { flex: 1; min-height: 0; gap: 0; }
+.editor-top { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 10px 18px 8px; background: var(--bg); }
+.editor-bottom {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;              /* scorre da solo, il blocco sopra resta fermo */
+  padding: 12px 18px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.video-title { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* altezza del video: di base ~30% dello schermo, regolabile trascinando la barra sotto la timeline */
+.player-box video { max-height: var(--player-h, 27vh); }
+
+.split-handle {
+  flex: none;
+  height: 9px;
+  cursor: row-resize;
+  background: var(--panel) linear-gradient(#777, #777) center / 48px 3px no-repeat;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  touch-action: none;
+}
+.split-handle:hover, .split-handle.dragging { background-color: #3a3a3a; }
+
+.short-settings {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.short-settings h2 { margin: 0; }
+
+/* Schermi bassi: niente divisione, ma il blocco video+timeline resta agganciato in alto */
+@media (max-height: 699px) {
+  .editor { overflow-y: auto; display: block; }
+  .workspace { display: block; }
+  .editor-top { position: sticky; top: 0; z-index: 20; box-shadow: 0 6px 12px rgba(0, 0, 0, .45); }
+  .split-handle { display: none; }
+  .editor-bottom { overflow: visible; }
+  .player-box video { max-height: var(--player-h, 24vh); }
+}
+
+/* Finestre strette: una colonna sola; scorre la pagina, video+timeline restano agganciati in alto */
+@media (max-width: 1099px) {
+  html, body { height: auto; }
+  body { display: block; }
+  .layout { display: block; }
+  .sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+  .video-list { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
+  .video-list li { flex: 0 0 220px; }
+  .shorts-panel { border-left: none; border-top: 1px solid var(--border); }
+  .shorts-list { flex-direction: row; overflow-x: auto; }
+  .short-card { flex: 0 0 200px; }
+  .editor { overflow: visible; display: block; }
+  .workspace { display: block; }
+  .editor-top { position: sticky; top: 0; z-index: 20; box-shadow: 0 6px 12px rgba(0, 0, 0, .45); }
+  .split-handle { display: none; }
+  .editor-bottom { overflow: visible; }
+  .player-box video { max-height: var(--player-h, 26vh); }
+}
+
+/* ---------- Blocco fisso più compatto ---------- */
+.topbar { padding: 7px 16px; }
+.editor-top { gap: 6px; padding-top: 8px; }
+.video-title { font-size: 14px; margin: 0; line-height: 1.3; }
+.controls { gap: 8px 20px; }
+.timeline-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
+.timeline-bar .export { margin-left: auto; }
+.help {
+  display: inline-grid; place-items: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid var(--border); color: var(--muted); font-size: 12px; font-weight: 700;
+  cursor: help; user-select: none;
+}
+.help:hover, .help:focus { color: var(--text); border-color: var(--accent); }
+.sp-label {
+  position: absolute; top: 4px; left: 4px; z-index: 2;
+  font-size: 10px; line-height: 1; padding: 3px 5px; border-radius: 3px;
+  background: rgba(0, 0, 0, .55); color: #ddd; pointer-events: none;
+}

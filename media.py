@@ -132,6 +132,11 @@ def download_youtube(url: str, dest_dir: Path, progress: ProgressCb) -> Path:
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
+        # connessioni lente: aspetta di più e riprova più volte prima di arrendersi
+        "socket_timeout": 60,
+        "retries": 15,
+        "fragment_retries": 15,
+        "extractor_retries": 5,
         "progress_hooks": [hook],
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -248,17 +253,18 @@ def unload_whisper() -> None:
 def transcribe(src: Path, duration: float, progress: ProgressCb) -> dict:
     """Restituisce {"model", "words": [{"s", "e", "w"}, ...]} con i tempi di ogni parola."""
     global _whisper
-    from faster_whisper import BatchedInferencePipeline, WhisperModel
+    from faster_whisper import WhisperModel
 
     if _whisper is None:
         progress(0.0, "Carico il modello (la prima volta lo scarica, ~500 MB)")
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
-                             cpu_threads=os.cpu_count() or 4)
-        # modalità "a lotti": su CPU circa 2 volte più veloce, stessa qualità nei test
-        _whisper = BatchedInferencePipeline(model=model)
+        _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
+                                cpu_threads=os.cpu_count() or 4)
     progress(0.0, "Trascrizione")
+    # Modalità normale (non "a lotti"): ~4x tempo reale su CPU. La modalità a lotti era quasi
+    # 2 volte più veloce ma su alcuni tratti saltava il parlato o si "incantava" ripetendo parole
+    # (su un video di 10 minuti perdeva il 14% delle parole).
     segments, _info = _whisper.transcribe(
-        str(src), language="it", word_timestamps=True, batch_size=8, beam_size=1,
+        str(src), language="it", word_timestamps=True, beam_size=1, vad_filter=True,
         initial_prompt=WHISPER_PROMPT,
     )
     words: list[dict] = []
@@ -275,7 +281,8 @@ def transcribe(src: Path, duration: float, progress: ProgressCb) -> dict:
             else:
                 words.append({"s": round(float(w.start), 2), "e": round(float(w.end), 2), "w": text})
         progress(min(1.0, seg.end / max(1.0, duration)), "Trascrizione")
-    return {"model": WHISPER_MODEL, "words": words}
+    # "metodo": 2 = modalità normale; le trascrizioni senza questo campo sono della vecchia modalità a lotti
+    return {"model": WHISPER_MODEL, "metodo": 2, "words": words}
 
 
 # --------------------------------------------------------------------------
