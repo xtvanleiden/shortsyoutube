@@ -1395,6 +1395,20 @@ function visibleSuggestions() {
 }
 
 $("sug-hide-used").checked = recall("hideUsed") === "1";
+
+// ordine delle schede: per punteggio (dal più alto) o cronologico; la scelta viene ricordata
+$("sug-sort").value = recall("sugSort") === "time" ? "time" : "score";
+$("sug-sort").addEventListener("change", () => {
+  store("sugSort", $("sug-sort").value);
+  renderSuggestions();
+});
+
+/** Tutta la lista (anche i suggerimenti aggiunti dopo) ordinata secondo la scelta. */
+function sortSuggestions(list) {
+  const byTime = $("sug-sort").value === "time";
+  return [...list].sort((a, b) => byTime ? a.g.start - b.g.start
+                                         : b.g.score - a.g.score || a.g.start - b.g.start);
+}
 $("sug-hide-used").addEventListener("change", () => {
   store("hideUsed", $("sug-hide-used").checked ? "1" : "0");
   renderSuggestions();
@@ -1430,7 +1444,7 @@ function renderSuggestions(note = "") {
   $("tl-sugs").innerHTML = shown.map(({ g, k, used }) =>
     `<div class="tl-sug ${used ? "used" : ""}" data-k="${k}" title="Clip ${g.rank}${used ? " (già usato per uno Short)" : ""}: ${fmt(g.start, 1)} → ${fmt(g.end, 1)}\n${escapeHtml(g.reasons.join("\n"))}">${g.rank}</div>`
   ).join("");
-  $("sug-list").innerHTML = shown.map(({ g, k, used }) => `
+  $("sug-list").innerHTML = sortSuggestions(shown).map(({ g, k, used }) => `
     <div class="sug-item ${used ? "used" : ""}" data-k="${k}">
       <div class="sug-top">
         <span class="sug-rank">${g.rank}</span>

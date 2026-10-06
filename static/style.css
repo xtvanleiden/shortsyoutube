@@ -346,7 +346,9 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
 /* ---------- Riepilogo testo selezione, suggerimenti usati ---------- */
 .tr-range { margin: 0 0 6px; color: var(--muted); }
 .tr-range .gap { color: #ffb74d; }
-.sug-hide { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.sug-sort { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.sug-sort select { padding: 3px 6px; font-size: 12px; }
+.sug-hide { display: flex; align-items: center; gap: 4px; }
 .tl-sug.used { background: #555; color: #ddd; opacity: .6; }
 .tl-sug.used.active { background: var(--sel); color: #000; opacity: 1; }
 .sug-item.used { opacity: .6; }
